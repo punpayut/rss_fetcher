@@ -1,0 +1,51 @@
+# .github/workflows/rss_fetcher.yml
+
+name: Fetch and Analyze RSS Feeds
+
+on:
+  # 1. ตั้งเวลาให้รันอัตโนมัติ (Schedule)
+  #    '0 * * * *' หมายถึง "รันทุกๆ ชั่วโมง, ที่นาทีที่ 0"
+  #    (เช่น 1:00, 2:00, 3:00)
+  schedule:
+    - cron: '0 * * * *'
+
+  # 2. อนุญาตให้รันแบบ manual ได้จากหน้า Actions ใน GitHub
+  #    เหมาะสำหรับตอนทดสอบ
+  workflow_dispatch:
+
+jobs:
+  # ชื่องาน (Job) ที่จะทำ
+  run-worker:
+    # 3. กำหนดสภาพแวดล้อมที่จะรัน
+    #    'ubuntu-latest' คือเครื่องเสมือน Linux ที่ทันสมัย
+    runs-on: ubuntu-latest
+
+    steps:
+      # 4. ขั้นตอนที่ 1: Checkout Code
+      #    ดึงโค้ดล่าสุดจาก repository ของคุณมาไว้ในเครื่องเสมือน
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 5. ขั้นตอนที่ 2: ตั้งค่า Python
+      #    ติดตั้ง Python เวอร์ชันที่ต้องการ
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # สามารถเปลี่ยนเป็นเวอร์ชันอื่นได้ตามต้องการ
+
+      # 6. ขั้นตอนที่ 3: ติดตั้ง Dependencies
+      #    อ่านไฟล์ requirements.txt แล้วติดตั้ง library ที่จำเป็นทั้งหมด
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 7. ขั้นตอนที่ 4: รัน Worker Script
+      #    นี่คือขั้นตอนที่สำคัญที่สุด คือการสั่งให้ 'worker.py' ทำงาน
+      - name: Run worker script
+        env:
+          # กำหนด Environment Variables ให้กับสคริปต์
+          # ค่าของมันจะถูกดึงมาจาก "Repository Secrets" ที่เราจะตั้งค่าในขั้นตอนถัดไป
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
+        run: python worker.py
