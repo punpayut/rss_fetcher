@@ -42,7 +42,7 @@ jobs:
 
       # 7. ขั้นตอนที่ 4: รัน Worker Script
       #    นี่คือขั้นตอนที่สำคัญที่สุด คือการสั่งให้ 'worker.py' ทำงาน
-      - name: Run worker script
+      - name: Run worker scripะ
         env:
           # กำหนด Environment Variables ให้กับสคริปต์
           # ค่าของมันจะถูกดึงมาจาก "Repository Secrets" ที่เราจะตั้งค่าในขั้นตอนถัดไป
