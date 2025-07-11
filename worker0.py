@@ -1,10 +1,9 @@
-# worker.py (with Yahoo Full Article Scraping)
+# worker.py (Updated with Enhanced Exception Logging)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
 - This script is designed to be run on a schedule (e.g., via GitHub Actions).
 - It fetches news from a comprehensive list of English and Thai RSS feeds.
-- For Yahoo Finance, it follows the link to scrape the full article content for better AI analysis.
 - It analyzes news sequentially with a delay to respect API rate limits.
 - It stores the structured data in Firestore.
 """
@@ -20,8 +19,6 @@ from typing import List, Dict, Optional, Any
 from concurrent.futures import ThreadPoolExecutor
 
 import feedparser
-import requests
-from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict
 
 from groq import Groq
@@ -53,6 +50,7 @@ except Exception as e:
     exit(1)
 
 # --- Constants ---
+# Restored the full list of RSS feeds for production use
 RSS_FEEDS = {
     'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
     'Investing.com': 'https://th.investing.com/rss/news_25.rss',
@@ -88,66 +86,32 @@ def clean_html(raw_html: str) -> str:
 def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
-# --- NEW FUNCTION FOR WEB SCRAPING ---
-def fetch_full_article_content(url: str) -> str:
-    """
-    Fetches and parses the full article content from a Yahoo Finance news link.
-    Returns the text content of the article body.
-    """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # The main article body on Yahoo Finance is typically within a div with the class 'caas-body'
-        article_body = soup.find('div', class_='caas-body')
-        
-        if article_body:
-            # Get all text from the article body and join it together
-            return ' '.join(p.get_text(strip=True) for p in article_body.find_all('p'))
-        else:
-            logger.warning(f"Could not find article body ('caas-body') for URL: {url}")
-            return ""
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch article from {url}: {e}")
-        return ""
-    except Exception as e:
-        logger.error(f"An unexpected error occurred while scraping {url}: {e}", exc_info=True)
-        return ""
-
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
+    # --- THIS IS THE UPDATED FUNCTION ---
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
+            # Define a common browser User-Agent to avoid being blocked
             user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            
+            # Use the 'agent' parameter when parsing the feed
             feed = feedparser.parse(url, agent=user_agent)
 
-            for entry in feed.entries[:7]: # Limit to first 7 entries per feed
+            # Add logging for better debugging on GitHub Actions
+            if feed.bozo:
+                logger.warning(f"WORKER: Feed from '{source_name}' may be malformed. Bozo exception: {feed.get('bozo_exception', 'N/A')}")
+            
+            if not feed.entries:
+                status = feed.get('status', 'N/A')
+                logger.warning(f"WORKER: No entries found in the feed for '{source_name}'. Status code received: {status}")
+
+            for entry in feed.entries[:7]:
                 try:
-                    content_to_analyze = ""
-                    # --- MODIFICATION: Special handling for Yahoo Finance ---
-                    if source_name == 'Yahoo Finance':
-                        logger.info(f"-> Scraping full article for Yahoo Finance: {entry.title[:50]}...")
-                        content_to_analyze = fetch_full_article_content(entry.link)
-                    
-                    # Fallback for other feeds or if Yahoo scraping fails
-                    if not content_to_analyze:
-                        content_to_analyze = entry.get('summary', entry.get('description', entry.get('title', '')))
-
-                    cleaned_content = clean_html(content_to_analyze)
-                    
-                    if not cleaned_content:
-                        logger.warning(f"Skipping entry with no content: {entry.link}")
-                        continue # Skip this entry if no content could be found
-
+                    rss_summary = entry.get('summary', entry.get('description', ''))
+                    cleaned_content = clean_html(rss_summary)
                     published_dt = datetime(*entry.published_parsed[:6]) if hasattr(entry, 'published_parsed') else datetime.now()
                     safe_id = url_to_firestore_id(entry.link)
                     
@@ -157,23 +121,24 @@ class NewsAggregator:
                         link=entry.link,
                         source=source_name,
                         published=published_dt,
-                        content=cleaned_content[:4000] # Increased limit for full articles
+                        content=cleaned_content[:1500]
                     )
                     items.append(news_item)
                 except Exception as e:
                     logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}", exc_info=True)
         except Exception as e:
+            # THIS IS THE CRITICAL CHANGE: Add exc_info=True to log the full traceback
             logger.error(f"WORKER: A critical error occurred in _fetch_from_feed for {source_name}", exc_info=True)
         return items
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        with ThreadPoolExecutor(max_workers=5) as executor: # Reduced workers to be gentler when scraping
+        # Use a reasonable number of workers to avoid overwhelming the network or getting rate-limited
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
                 all_items.extend(future.result())
         
-        # This filter is now less likely to remove Yahoo news as we scrape content
         unique_items_dict = {item.id: item for item in all_items if item.content}
         unique_items_list = list(unique_items_dict.values())
         
@@ -182,7 +147,6 @@ class NewsAggregator:
         logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from RSS feeds.")
         return sorted_items
 
-# ... (AIProcessor and main function remain unchanged) ...
 class AIProcessor:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
@@ -196,11 +160,11 @@ class AIProcessor:
             return None
         
         prompt = f"""
-        You are a top-tier financial analyst AI for an app called FinanceFlow. Analyze the provided news article content. The content might be in English or Thai.
+        You are a top-tier financial analyst AI for an app called FinanceFlow. Analyze the provided news summary from an RSS feed. The content might be in English or Thai.
 
         Source: {news_item.source}
         Title: {news_item.title}
-        Article Content: {news_item.content}
+        Provided Summary (Content): {news_item.content}
 
         Your primary task is to respond with a valid JSON object. This JSON must conform to the following structure:
         {{

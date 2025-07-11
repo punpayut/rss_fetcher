@@ -1,14 +1,16 @@
-# requirements.txt (Final Clean Version for FinanceFlow Project)
+# requirements.txt (Final Version with Scraper)
 
 # Core libraries for both worker and backend
 python-dotenv
 firebase-admin
 groq
 
-# Libraries specifically for worker.py
+# Libraries for worker.py
 feedparser
+requests
+beautifulsoup4
 
-# Libraries specifically for finance_news_backend.py
+# Libraries for finance_news_backend.py
 Flask
 Flask-Cors
 yfinance
