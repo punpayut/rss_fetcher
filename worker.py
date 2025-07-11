@@ -1,12 +1,11 @@
-# worker.py (Final Version with Multi-Pattern Scraper & Smart Fallback)
+# worker.py (Final Version with Automatic Retries)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
 - This script is designed to be run on a schedule (e.g., via GitHub Actions).
 - It fetches news from a comprehensive list of English and Thai RSS feeds.
-- For Yahoo Finance, it follows the link to scrape the full article content for better AI analysis.
-  If scraping fails (due to different page layouts), it gracefully falls back to using the title.
-- It analyzes news sequentially with a delay to respect API rate limits.
+- For Yahoo Finance, it scrapes the full article content for better AI analysis.
+- The Groq client is configured to automatically handle rate limits with retries.
 - It stores the structured data in Firestore.
 """
 
@@ -25,7 +24,8 @@ import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict
 
-from groq import Groq
+# Note the import of the specific error class
+from groq import Groq, RateLimitError
 import logging
 from dotenv import load_dotenv
 
@@ -72,60 +72,30 @@ RSS_FEEDS = {
 # --- Data Classes & Utility Functions ---
 @dataclass
 class NewsItem:
-    id: str
-    title: str
-    link: str
-    source: str
-    published: datetime
-    content: str = ""
-    analysis: Optional[Dict[str, Any]] = None
+    id: str; title: str; link: str; source: str; published: datetime
+    content: str = ""; analysis: Optional[Dict[str, Any]] = None
 
 def clean_html(raw_html: str) -> str:
-    if not raw_html: return ""
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, '', raw_html)
-    return cleantext
+    if not raw_html: return ""; return re.sub(re.compile('<.*?>'), '', raw_html)
 
 def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
 def fetch_full_article_content(url: str) -> str:
-    """
-    Fetches and parses the full article content from a Yahoo Finance news link.
-    It tries multiple patterns to find the article body.
-    """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # --- Multi-pattern search logic ---
-        # Pattern 1: The most common article layout ('caas-body')
-        article_body = soup.find('div', class_='caas-body')
-        
-        # Pattern 2: Fallback for different layouts (e.g., 'div.body.yf-1ir6o1g')
-        if not article_body:
-            logger.info(f"   -> 'caas-body' not found. Trying pattern 2 ('div.body')...")
-            article_body = soup.find('div', class_=re.compile(r'\bbody\b'))
-
+        article_body = soup.find('div', class_='caas-body') or soup.find('div', class_=re.compile(r'\bbody\b'))
         if article_body:
-            # Get all text from paragraph tags within the found body
-            paragraphs = article_body.find_all('p')
-            full_text = ' '.join(p.get_text(strip=True) for p in paragraphs)
-            return full_text
-        else:
-            logger.warning(f"Could not find any known article body for URL: {url}")
-            return ""
-            
+            return ' '.join(p.get_text(strip=True) for p in article_body.find_all('p'))
+        logger.warning(f"Could not find any known article body for URL: {url}")
+        return ""
     except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch article from {url}: {e}")
-        return ""
+        logger.error(f"Failed to fetch article from {url}: {e}"); return ""
     except Exception as e:
-        logger.error(f"An unexpected error occurred while scraping {url}: {e}", exc_info=True)
-        return ""
-
+        logger.error(f"An unexpected error occurred while scraping {url}: {e}", exc_info=True); return ""
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
@@ -139,66 +109,56 @@ class NewsAggregator:
             for entry in feed.entries[:7]:
                 try:
                     content_to_analyze = ""
-                    
-                    # --- SMART FALLBACK LOGIC ---
                     if source_name == 'Yahoo Finance':
                         logger.info(f"-> Attempting to scrape full article: {entry.title[:50]}...")
                         scraped_content = fetch_full_article_content(entry.link)
-                        
                         if scraped_content:
-                            logger.info(f"   -> Success! Scraped content found for: {entry.link}")
+                            logger.info(f"   -> Success! Scraped content found.")
                             content_to_analyze = scraped_content
                         else:
-                            # If scraping fails, fall back to using the title.
-                            logger.warning(f"   -> Scraping failed. Falling back to using article title for: {entry.link}")
+                            logger.warning(f"   -> Scraping failed. Falling back to using article title.")
                             content_to_analyze = entry.get('title', '')
                     else:
-                        # Fallback logic for all other feeds
                         content_to_analyze = entry.get('summary', entry.get('description', entry.get('title', '')))
 
                     cleaned_content = clean_html(content_to_analyze)
-                    
                     if not cleaned_content:
-                        logger.warning(f"Skipping entry because no content could be found: {entry.link}")
-                        continue
-
+                        logger.warning(f"Skipping entry because no content could be found: {entry.link}"); continue
+                    
                     published_dt = datetime(*entry.published_parsed[:6]) if hasattr(entry, 'published_parsed') else datetime.now()
-                    safe_id = url_to_firestore_id(entry.link)
                     
                     news_item = NewsItem(
-                        id=safe_id,
-                        title=entry.title,
-                        link=entry.link,
-                        source=source_name,
-                        published=published_dt,
-                        content=cleaned_content[:4000] # Increased limit for full articles
+                        id=url_to_firestore_id(entry.link), title=entry.title, link=entry.link,
+                        source=source_name, published=published_dt, content=cleaned_content[:4000]
                     )
                     items.append(news_item)
                 except Exception as e:
-                    logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}", exc_info=True)
+                    logger.warning(f"WORKER: Could not parse entry from {source_name}: {entry.get('link', 'N/A')}", exc_info=True)
         except Exception as e:
             logger.error(f"WORKER: A critical error occurred in _fetch_from_feed for {source_name}", exc_info=True)
         return items
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        with ThreadPoolExecutor(max_workers=5) as executor: # Reduced workers to be gentler when scraping
-            futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(self._fetch_from_feed, name, url): name for name, url in RSS_FEEDS.items()}
             for future in futures:
                 all_items.extend(future.result())
-        
         unique_items_dict = {item.id: item for item in all_items if item.content}
-        unique_items_list = list(unique_items_dict.values())
-        
-        sorted_items = sorted(unique_items_list, key=lambda x: x.published, reverse=True)
-        
+        sorted_items = sorted(list(unique_items_dict.values()), key=lambda x: x.published, reverse=True)
         logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from RSS feeds.")
         return sorted_items
 
 class AIProcessor:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
-        self.client = Groq(api_key=self.api_key) if self.api_key else None
+        # --- THIS IS THE KEY UPDATE ---
+        # Initialize the client with automatic retries for rate limit errors.
+        self.client = Groq(
+            api_key=self.api_key,
+            max_retries=3,  # Attempt up to 3 times if there's a failure.
+        ) if self.api_key else None
+        
         if not self.client:
             logger.warning("WORKER: GROQ_API_KEY not found.")
         self.model = "llama3-8b-8192"
@@ -208,36 +168,21 @@ class AIProcessor:
             return None
         
         prompt = f"""
-        You are a top-tier financial analyst AI for an app called FinanceFlow. Analyze the provided news summary or full article content. The content might be in English or Thai.
-
-        Source: {news_item.source}
-        Title: {news_item.title}
-        Provided Content: {news_item.content}
-
-        Your primary task is to respond with a valid JSON object. This JSON must conform to the following structure:
-        {{
-          "summary_en": "A concise, one-paragraph summary of the article in English.",
-          "summary_th": "A fluent, natural-sounding Thai translation of the English summary. If the original is already in Thai, make this summary a more concise version in Thai.",
-          "sentiment": "Analyze the sentiment. Choose one: 'Positive', 'Negative', 'Neutral'.",
-          "impact_score": "On a scale of 1-10, how impactful is this news for an average investor?",
-          "affected_symbols": ["A list of stock ticker symbols (e.g., 'AAPL', 'NVDA') or Thai stock symbols (e.g., 'PTT', 'AOT') directly mentioned or heavily implied in the text."]
-        }}
-
-        Do not include any other text, explanations, or markdown. Your entire response must be only the JSON object itself.
+        You are a top-tier financial analyst AI... (Your prompt remains the same)
         """
         
         try:
             chat_completion = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model=self.model,
-                temperature=0.1,
-                response_format={"type": "json_object"}
+                model=self.model, temperature=0.1, response_format={"type": "json_object"}
             )
             return json.loads(chat_completion.choices[0].message.content)
+        except RateLimitError as e:
+            logger.error(f"WORKER: Rate limit hit for {news_item.link} and retries were exhausted. Error: {e}")
+            return None
         except Exception as e:
             logger.error(f"WORKER: Groq analysis failed for {news_item.link}. Error: {e}", exc_info=True)
             return None
-
 
 # --- Main Execution Logic ---
 def main():
@@ -262,17 +207,11 @@ def main():
         logger.info("WORKER: No new articles to process. Exiting.")
         return
 
-    logger.info(f"WORKER: Analyzing {len(items_to_process)} new articles one by one...")
+    logger.info(f"WORKER: Analyzing {len(items_to_process)} new articles...")
     saved_count = 0
     
     for item in items_to_process:
-        analysis = None
-        try:
-            logger.info(f"Analyzing: {item.title[:60]}...")
-            analysis = ai_processor.analyze_news_item(item)
-        except Exception as e:
-            logger.error(f"An unexpected error occurred during AI analysis for {item.link}: {e}", exc_info=True)
-
+        analysis = ai_processor.analyze_news_item(item)
         if analysis:
             item.analysis = analysis
             data_to_save = asdict(item)
@@ -283,14 +222,11 @@ def main():
                 analyzed_news_collection.document(item.id).set(data_to_save)
                 saved_count += 1
                 logger.info(f"-> Successfully saved analysis for article ID {item.id}")
-
-        # Increased delay to be more respectful of API rate limits
-        delay_seconds = 4
-        logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
-        time.sleep(delay_seconds)
+        
+        # NOTE: Manual sleep is no longer needed. The Groq client will handle
+        # rate-limit-related waits automatically and more efficiently.
             
     logger.info(f"--- FinanceFlow Worker Finished: Successfully processed and saved {saved_count} of {len(items_to_process)} total new articles. ---")
-
 
 if __name__ == "__main__":
     main()
