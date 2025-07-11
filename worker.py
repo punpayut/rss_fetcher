@@ -1,4 +1,4 @@
-# worker.py (Updated to Fix GitHub Actions Fetching Issue)
+# worker.py (Updated with Enhanced Exception Logging)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
@@ -52,7 +52,24 @@ except Exception as e:
 # --- Constants ---
 # Restored the full list of RSS feeds for production use
 RSS_FEEDS = {
-    'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex'
+    'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
+    'Reuters Business': 'http://feeds.reuters.com/reuters/businessNews',
+    'CNBC Top News': 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
+    'Investing.com': 'https://www.investing.com/rss/news.rss',
+    'MarketWatch': 'http://www.marketwatch.com/rss/topstories',
+    'CNN Money': 'http://rss.cnn.com/rss/money_latest.rss',
+    'The Motley Fool': 'https://www.fool.com/feeds/index.aspx?source=ibuttontopstories',
+    'Financial Times': 'https://www.ft.com/rss/home',
+    'The Economist': 'https://www.economist.com/finance-and-economics/rss.xml',
+    'Forex News': 'https://www.investing.com/rss/news_1.rss',
+    'Commodities & Futures News': 'https://www.investing.com/rss/news_11.rss',
+    'Stock Market News': 'https://www.investing.com/rss/news_25.rss',
+    'Economic Indicators': 'https://www.investing.com/rss/news_95.rss',
+    'กรุงเทพธุรกิจ': 'https://www.bangkokbiznews.com/rss/economy.xml',
+    'ไทยรัฐหุ้น': 'https://www.thairath.co.th/rss/news/finance/stock.xml',
+    'ประชาชาติธุรกิจ': 'https://www.prachachat.net/feed',
+    'ฐานเศรษฐกิจ': 'https://www.thansettakij.com/rss.xml',
+    'ผู้จัดการ-หุ้น': 'https://mgronline.com/rss/stock/stock.xml'
 }
 
 # --- Data Classes & Utility Functions ---
@@ -114,15 +131,15 @@ class NewsAggregator:
                     )
                     items.append(news_item)
                 except Exception as e:
-                    logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}")
+                    logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"WORKER: Failed to parse feed {source_name} at {url}: {e}")
+            # THIS IS THE CRITICAL CHANGE: Add exc_info=True to log the full traceback
+            logger.error(f"WORKER: A critical error occurred in _fetch_from_feed for {source_name}", exc_info=True)
         return items
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
         # Use a reasonable number of workers to avoid overwhelming the network or getting rate-limited
-        # A good starting point is between 5 and 10, not necessarily the total number of feeds.
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
@@ -176,7 +193,7 @@ class AIProcessor:
             )
             return json.loads(chat_completion.choices[0].message.content)
         except Exception as e:
-            logger.error(f"WORKER: Groq analysis failed for {news_item.link}. Error: {e}")
+            logger.error(f"WORKER: Groq analysis failed for {news_item.link}. Error: {e}", exc_info=True)
             return None
 
 
@@ -191,17 +208,11 @@ def main():
     
     items_to_process = []
     if analyzed_news_collection:
-        # Check for existing documents in a more efficient way if possible, but this works for moderate scale
-        # For very large scales, consider alternative methods to check existence.
-        doc_ids_to_check = [item.id for item in latest_news]
-        # In a high-traffic app, fetching all docs to check for existence can be slow/costly.
-        # This approach is fine for this project's scale.
         for item in latest_news:
             doc_ref = analyzed_news_collection.document(item.id)
             if not doc_ref.get().exists:
                 items_to_process.append(item)
     else:
-        # Fallback if Firestore is not available
         items_to_process = latest_news
 
     logger.info(f"WORKER: Found {len(items_to_process)} new articles to process.")
@@ -218,13 +229,12 @@ def main():
             logger.info(f"Analyzing: {item.title[:60]}...")
             analysis = ai_processor.analyze_news_item(item)
         except Exception as e:
-            logger.error(f"An unexpected error occurred during AI analysis for {item.link}: {e}")
+            logger.error(f"An unexpected error occurred during AI analysis for {item.link}: {e}", exc_info=True)
 
         if analysis:
             item.analysis = analysis
             data_to_save = asdict(item)
             data_to_save['processed_at'] = firestore.SERVER_TIMESTAMP
-            # Convert datetime object to ISO 8601 string format for JSON compatibility
             data_to_save['published'] = item.published.isoformat()
             
             if analyzed_news_collection:
@@ -232,7 +242,6 @@ def main():
                 saved_count += 1
                 logger.info(f"-> Successfully saved analysis for article ID {item.id}")
 
-        # Increased delay to 4 seconds to be more respectful of API rate limits
         delay_seconds = 4
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)

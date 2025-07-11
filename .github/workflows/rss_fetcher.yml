@@ -1,5 +1,3 @@
-# .github/workflows/rss_fetcher.yml
-
 name: Fetch and Analyze RSS Feeds
 
 on:
@@ -40,12 +38,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 7. ขั้นตอนที่ 4: รัน Worker Script
+      # 7. --- ขั้นตอน DEBUG ที่เพิ่มเข้ามาใหม่ ---
+      #    ขั้นตอนนี้จะทดสอบการเชื่อมต่อโดยตรงกับ RSS feed โดยไม่ผ่าน Python
+      #    เพื่อตรวจสอบว่าปัญหาเกิดจาก Network หรือไม่ (เช่น GitHub Actions ถูกบล็อก)
+      - name: 'Debug: Directly fetch RSS feed with curl'
+        run: |
+          echo "--- Attempting to fetch Yahoo Finance RSS feed with curl ---"
+          # -v = Verbose (แสดงรายละเอียดการเชื่อมต่อ)
+          # -L = Follow redirects (ตามไปที่ URL ใหม่ถ้ามีการ redirect)
+          # -A = User-Agent (ปลอมตัวเป็นเบราว์เซอร์)
+          curl -vL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36" "https://finance.yahoo.com/news/rssindex"
+          echo "-------------------- End of curl command --------------------"
+
+      # 8. ขั้นตอนที่ 5: รัน Worker Script
       #    นี่คือขั้นตอนที่สำคัญที่สุด คือการสั่งให้ 'worker.py' ทำงาน
-      - name: Run worker scripะ
+      - name: Run worker script
         env:
           # กำหนด Environment Variables ให้กับสคริปต์
-          # ค่าของมันจะถูกดึงมาจาก "Repository Secrets" ที่เราจะตั้งค่าในขั้นตอนถัดไป
+          # ค่าของมันจะถูกดึงมาจาก "Repository Secrets"
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
         run: python worker.py
