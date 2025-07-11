@@ -1,61 +1,27 @@
 name: Fetch and Analyze RSS Feeds
 
 on:
-  # 1. ตั้งเวลาให้รันอัตโนมัติ (Schedule)
-  #    '0 * * * *' หมายถึง "รันทุกๆ ชั่วโมง, ที่นาทีที่ 0"
-  #    (เช่น 1:00, 2:00, 3:00)
-  schedule:
-    - cron: '0 * * * *'
-
-  # 2. อนุญาตให้รันแบบ manual ได้จากหน้า Actions ใน GitHub
-  #    เหมาะสำหรับตอนทดสอบ
   workflow_dispatch:
 
 jobs:
-  # ชื่องาน (Job) ที่จะทำ
   run-worker:
-    # 3. กำหนดสภาพแวดล้อมที่จะรัน
-    #    'ubuntu-latest' คือเครื่องเสมือน Linux ที่ทันสมัย
     runs-on: ubuntu-latest
 
     steps:
-      # 4. ขั้นตอนที่ 1: Checkout Code
-      #    ดึงโค้ดล่าสุดจาก repository ของคุณมาไว้ในเครื่องเสมือน
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 5. ขั้นตอนที่ 2: ตั้งค่า Python
-      #    ติดตั้ง Python เวอร์ชันที่ต้องการ
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11' # สามารถเปลี่ยนเป็นเวอร์ชันอื่นได้ตามต้องการ
+          python-version: '3.11'
 
-      # 6. ขั้นตอนที่ 3: ติดตั้ง Dependencies
-      #    อ่านไฟล์ requirements.txt แล้วติดตั้ง library ที่จำเป็นทั้งหมด
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # ใช้ requirements.txt เพื่อให้เวอร์ชันตรงกัน
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 7. --- ขั้นตอน DEBUG ที่เพิ่มเข้ามาใหม่ ---
-      #    ขั้นตอนนี้จะทดสอบการเชื่อมต่อโดยตรงกับ RSS feed โดยไม่ผ่าน Python
-      #    เพื่อตรวจสอบว่าปัญหาเกิดจาก Network หรือไม่ (เช่น GitHub Actions ถูกบล็อก)
-      - name: 'Debug: Directly fetch RSS feed with curl'
-        run: |
-          echo "--- Attempting to fetch Yahoo Finance RSS feed with curl ---"
-          # -v = Verbose (แสดงรายละเอียดการเชื่อมต่อ)
-          # -L = Follow redirects (ตามไปที่ URL ใหม่ถ้ามีการ redirect)
-          # -A = User-Agent (ปลอมตัวเป็นเบราว์เซอร์)
-          curl -vL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36" "https://finance.yahoo.com/news/rssindex"
-          echo "-------------------- End of curl command --------------------"
-
-      # 8. ขั้นตอนที่ 5: รัน Worker Script
-      #    นี่คือขั้นตอนที่สำคัญที่สุด คือการสั่งให้ 'worker.py' ทำงาน
-      - name: Run worker script
-        env:
-          # กำหนด Environment Variables ให้กับสคริปต์
-          # ค่าของมันจะถูกดึงมาจาก "Repository Secrets"
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
-        run: python worker.py
+      # --- รันสคริปต์ทดสอบตัวเล็กแทน ---
+      - name: Run Minimal Test Script
+        run: python test_feed.py

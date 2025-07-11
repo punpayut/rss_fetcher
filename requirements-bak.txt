@@ -1,0 +1,14 @@
+# requirements_worker.txt
+
+# --- Data Fetching & Parsing ---
+feedparser==6.0.11
+
+# --- AI & LLM ---
+groq==0.9.0
+httpx==0.27.0
+
+# --- Database & Authentication ---
+firebase-admin==6.5.0
+
+# --- Environment Variables ---
+python-dotenv==1.0.1
