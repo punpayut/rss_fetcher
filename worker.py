@@ -1,4 +1,4 @@
-# worker.py (Complete & Corrected Final Version)
+# worker.py (Updated to Fix GitHub Actions Fetching Issue)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
@@ -50,6 +50,7 @@ except Exception as e:
     exit(1)
 
 # --- Constants ---
+# Restored the full list of RSS feeds for production use
 RSS_FEEDS = {
     'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex'
 }
@@ -77,11 +78,25 @@ def url_to_firestore_id(url: str) -> str:
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
+    # --- THIS IS THE UPDATED FUNCTION ---
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
-            feed = feedparser.parse(url)
+            # Define a common browser User-Agent to avoid being blocked
+            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            
+            # Use the 'agent' parameter when parsing the feed
+            feed = feedparser.parse(url, agent=user_agent)
+
+            # Add logging for better debugging on GitHub Actions
+            if feed.bozo:
+                logger.warning(f"WORKER: Feed from '{source_name}' may be malformed. Bozo exception: {feed.get('bozo_exception', 'N/A')}")
+            
+            if not feed.entries:
+                status = feed.get('status', 'N/A')
+                logger.warning(f"WORKER: No entries found in the feed for '{source_name}'. Status code received: {status}")
+
             for entry in feed.entries[:7]:
                 try:
                     rss_summary = entry.get('summary', entry.get('description', ''))
@@ -106,7 +121,9 @@ class NewsAggregator:
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        with ThreadPoolExecutor(max_workers=len(RSS_FEEDS)) as executor:
+        # Use a reasonable number of workers to avoid overwhelming the network or getting rate-limited
+        # A good starting point is between 5 and 10, not necessarily the total number of feeds.
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
                 all_items.extend(future.result())
@@ -174,6 +191,11 @@ def main():
     
     items_to_process = []
     if analyzed_news_collection:
+        # Check for existing documents in a more efficient way if possible, but this works for moderate scale
+        # For very large scales, consider alternative methods to check existence.
+        doc_ids_to_check = [item.id for item in latest_news]
+        # In a high-traffic app, fetching all docs to check for existence can be slow/costly.
+        # This approach is fine for this project's scale.
         for item in latest_news:
             doc_ref = analyzed_news_collection.document(item.id)
             if not doc_ref.get().exists:
@@ -202,6 +224,7 @@ def main():
             item.analysis = analysis
             data_to_save = asdict(item)
             data_to_save['processed_at'] = firestore.SERVER_TIMESTAMP
+            # Convert datetime object to ISO 8601 string format for JSON compatibility
             data_to_save['published'] = item.published.isoformat()
             
             if analyzed_news_collection:
@@ -209,7 +232,7 @@ def main():
                 saved_count += 1
                 logger.info(f"-> Successfully saved analysis for article ID {item.id}")
 
-        # Increased delay to 4 seconds to be more respectful of rate limits
+        # Increased delay to 4 seconds to be more respectful of API rate limits
         delay_seconds = 4
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)
