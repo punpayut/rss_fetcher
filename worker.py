@@ -53,23 +53,17 @@ except Exception as e:
 # Restored the full list of RSS feeds for production use
 RSS_FEEDS = {
     'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
-    'Reuters Business': 'http://feeds.reuters.com/reuters/businessNews',
+    'Investing.com': 'https://th.investing.com/rss/news_25.rss',
     'CNBC Top News': 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
-    'Investing.com': 'https://www.investing.com/rss/news.rss',
+    'Stock Market News': 'https://www.investing.com/rss/news_25.rss',
     'MarketWatch': 'http://www.marketwatch.com/rss/topstories',
     'CNN Money': 'http://rss.cnn.com/rss/money_latest.rss',
-    'The Motley Fool': 'https://www.fool.com/feeds/index.aspx?source=ibuttontopstories',
     'Financial Times': 'https://www.ft.com/rss/home',
     'The Economist': 'https://www.economist.com/finance-and-economics/rss.xml',
     'Forex News': 'https://www.investing.com/rss/news_1.rss',
     'Commodities & Futures News': 'https://www.investing.com/rss/news_11.rss',
-    'Stock Market News': 'https://www.investing.com/rss/news_25.rss',
     'Economic Indicators': 'https://www.investing.com/rss/news_95.rss',
-    'กรุงเทพธุรกิจ': 'https://www.bangkokbiznews.com/rss/economy.xml',
-    'ไทยรัฐหุ้น': 'https://www.thairath.co.th/rss/news/finance/stock.xml',
-    'ประชาชาติธุรกิจ': 'https://www.prachachat.net/feed',
-    'ฐานเศรษฐกิจ': 'https://www.thansettakij.com/rss.xml',
-    'ผู้จัดการ-หุ้น': 'https://mgronline.com/rss/stock/stock.xml'
+    'ประชาชาติธุรกิจ': 'https://www.prachachat.net/finance/feed'
 }
 
 # --- Data Classes & Utility Functions ---
