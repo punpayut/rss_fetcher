@@ -201,7 +201,7 @@ class AIProcessor:
         self.client = Groq(api_key=self.api_key) if self.api_key else None
         if not self.client:
             logger.warning("WORKER: GROQ_API_KEY not found.")
-        self.model = "llama3-8b-8192"
+        self.model = "llama3-70b-8192"
 
     def analyze_news_item(self, news_item: NewsItem) -> Optional[Dict[str, Any]]:
         if not self.client or not news_item.content:
