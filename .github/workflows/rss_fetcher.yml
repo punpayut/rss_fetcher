@@ -3,7 +3,7 @@ name: Fetch and Analyze RSS Feeds
 
 on:
   schedule:
-    # รันทุกๆ ชั่วโมง
+    # รันทุกๆ ชั่วโมง.
     - cron: '0 * * * *'
   
   # อนุญาตให้รันแบบ manual
