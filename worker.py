@@ -1,11 +1,11 @@
-# worker.py (Final Version with JavaScript Rendering for Investing.com)
+# worker.py (Final Version with Pyppeteer-Stealth)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
 - This script is designed to be run on a schedule (e.g., via GitHub Actions).
 - It fetches news from a comprehensive list of English and Thai RSS feeds.
 - For select sources (Yahoo, CNBC, Investing.com), it follows the link to scrape the full article content.
-  - For Investing.com, it uses a headless browser to render JavaScript and bypass anti-bot measures.
+  - For Investing.com, it uses a stealth headless browser (pyppeteer-stealth) to bypass advanced anti-bot measures.
 - It analyzes news sequentially with a delay to respect API rate limits.
 - It stores the structured data in Firestore.
 """
@@ -19,14 +19,16 @@ import time
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Callable
 from concurrent.futures import ThreadPoolExecutor
+import asyncio # Needed for pyppeteer
 
 import feedparser
 import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict
 
-### NEW/UPDATED ###
-from requests_html import HTMLSession # Use this for sites with JS challenges
+# Use pyppeteer and stealth plugin for the toughest websites
+import pyppeteer
+from pyppeteer_stealth import stealth
 
 from groq import Groq
 import logging
@@ -95,7 +97,7 @@ def url_to_firestore_id(url: str) -> str:
 # --- Scraper Functions ---
 
 def fetch_yahoo_article_content(url: str) -> str:
-    """ Fetches and parses full article content from a Yahoo Finance news link. """
+    """ Fetches and parses full article content from a Yahoo Finance news link using requests. """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -113,7 +115,7 @@ def fetch_yahoo_article_content(url: str) -> str:
         return ""
 
 def fetch_cnbc_article_content(url: str) -> str:
-    """ Fetches and parses full article content from a CNBC news link. """
+    """ Fetches and parses full article content from a CNBC news link using requests. """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -129,46 +131,73 @@ def fetch_cnbc_article_content(url: str) -> str:
         return ""
 
 ### UPDATED ###
-def fetch_investing_article_content(url: str) -> str:
-    """ Fetches and parses content from Investing.com by rendering JavaScript first. """
-    session = HTMLSession()
+async def fetch_investing_article_content_async(url: str) -> str:
+    """ Fetches content from Investing.com using a stealth headless browser to bypass anti-bot. """
+    browser = None
+    content = ""
     base_url = 'https://www.investing.com'
     if url.startswith('/'):
         url = base_url + url
         
     try:
-        response = session.get(url, timeout=15)
-        response.raise_for_status()
+        # Use the executable path provided by the environment variable in GitHub Actions
+        executable_path = os.getenv('PYPPETEER_EXECUTABLE_PATH')
         
-        # This is the crucial step: execute the JavaScript on the page
-        # The timeout here is for the rendering process itself.
-        logger.info(f"   -> Rendering JavaScript for {url}...")
-        response.html.render(timeout=20, sleep=1) # sleep=1 to wait for dynamic content
+        browser_args = [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
         
-        # Now search the *rendered* HTML
-        article_body = response.html.find('div#article_container', first=True)
-        if not article_body:
-             article_body = response.html.find('div#article', first=True)
+        launch_options = {'headless': True, 'args': browser_args}
+        if executable_path:
+            launch_options['executablePath'] = executable_path
+            
+        browser = await pyppeteer.launch(launch_options)
+        page = await browser.newPage()
 
-        if article_body:
-            # We can now process the found element
-            soup = BeautifulSoup(article_body.html, 'html.parser')
+        # Apply stealth measures to make the browser look like a real one
+        await stealth(page)
+
+        logger.info(f"   -> [Stealth] Navigating to {url}...")
+        await page.goto(url, {'waitUntil': 'networkidle0', 'timeout': 30000})
+
+        # Now get the content from the page
+        article_body_html = await page.evaluate(
+            '''() => {
+                const body = document.querySelector('div#article_container') || document.querySelector('div#article');
+                return body ? body.innerHTML : '';
+            }'''
+        )
+
+        if article_body_html:
+            soup = BeautifulSoup(article_body_html, 'html.parser')
             for element in soup.find_all("div", class_=["related_quotes", "js-related-article-wrapper"]):
                 element.decompose()
-            return ' '.join(p.get_text(strip=True) for p in soup.find_all('p'))
+            content = ' '.join(p.get_text(strip=True) for p in soup.find_all('p'))
+        else:
+            logger.warning(f"Could not find article body after stealth navigation for Investing.com URL: {url}")
         
-        logger.warning(f"Could not find article body after rendering for Investing.com URL: {url}")
-        return ""
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP Error {e.response.status_code} while scraping Investing.com URL {url}. The site is likely blocking the request.", exc_info=False)
-        return ""
     except Exception as e:
-        logger.error(f"An unexpected error occurred while scraping Investing.com URL {url}: {e}", exc_info=False)
-        return ""
+        logger.error(f"An unexpected error occurred with pyppeteer for Investing.com URL {url}: {e}", exc_info=False)
     finally:
-        session.close() # Close the session to free up resources
+        if browser:
+            await browser.close()
+    return content
 
-### UPDATED ###
+# Synchronous wrapper to call the async function from our main synchronous code
+def fetch_investing_article_content(url: str) -> str:
+    # On python 3.6 you need to use asyncio.get_event_loop().run_until_complete()
+    # On python 3.7+ asyncio.run() is simpler
+    return asyncio.run(fetch_investing_article_content_async(url))
+
+
+# --- Scraper Function Mapping ---
 SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Yahoo Finance': fetch_yahoo_article_content,
     'CNBC Top News': fetch_cnbc_article_content,
@@ -179,14 +208,13 @@ SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Economic Indicators': fetch_investing_article_content,
 }
 
-# The rest of the file is unchanged.
-
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
+            # Use a standard user-agent for feedparser itself
             user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
             feed = feedparser.parse(url, agent=user_agent)
 
@@ -232,7 +260,9 @@ class NewsAggregator:
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        # Since pyppeteer is resource-intensive, we reduce workers even more when scraping.
+        # It's better to be slow and successful than fast and blocked.
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
                 all_items.extend(future.result())
@@ -243,8 +273,8 @@ class NewsAggregator:
         logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from RSS feeds.")
         return sorted_items
 
-# --- The rest of the file (AIProcessor, main) is unchanged and can be copied from the previous version ---
-# ...
+# --- AIProcessor and main function are unchanged ---
+
 class AIProcessor:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
