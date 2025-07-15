@@ -1,56 +1,34 @@
-# .github/workflows/rss_fetcher.yml (Final Version - Updated for Pyppeteer-Stealth)
+# .github/workflows/rss_fetcher.yml (Final Version - Simplified)
 
-# ชื่อของ Workflow นี้ จะแสดงในหน้า Actions ของ GitHub
 name: Fetch and Analyze RSS Feeds
 
-# กำหนดเงื่อนไขที่จะให้ Workflow นี้ทำงาน
 on:
   schedule:
-    # รันทุกๆ ชั่วโมง ณ นาทีที่ 0 (เช่น 13:00, 14:00)
     - cron: '0 * * * *'
-  
-  # อนุญาตให้รันแบบ manual จากหน้า Actions ของ GitHub ได้
   workflow_dispatch:
 
 jobs:
   run-worker:
-    # กำหนดให้ Job นี้ทำงานบน Runner ของ Ubuntu เวอร์ชันล่าสุด
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout โค้ดจาก Repository ของเรามาไว้บน Runner
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. ตั้งค่าสภาพแวดล้อมของ Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # ใช้เวอร์ชัน Python ที่คุณระบุมา
           python-version: '3.11'
-
-      # 3. *** เพิ่มเข้ามาใหม่: ติดตั้ง Dependencies ของระบบสำหรับ Pyppeteer ***
-      #    ขั้นตอนนี้สำคัญมาก เพื่อให้เบราว์เซอร์ Headless ทำงานได้
-      - name: Install system dependencies for Pyppeteer
-        run: |
-          sudo apt-get update
-          sudo apt-get install -yq gconf-service libasound2 libatk-bridge2.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 ca-certificates fonts-liberation libappindicator1 libnss3 lsb-release xdg-utils wget libgbm-dev
-          sudo apt-get install -y chromium-browser
-
-      # 4. ติดตั้งไลบรารี Python ทั้งหมดจากไฟล์ requirements.txt
+      
+      # ไม่ต้องติดตั้ง dependencies ของระบบที่ซับซ้อนอีกต่อไป
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 5. *** อัปเดต: รันสคริปต์ worker.py พร้อม Environment Variable ที่จำเป็น ***
+      # ไม่ต้องมี PYPPETEER_EXECUTABLE_PATH อีกแล้ว
       - name: Run worker script
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GOOGLE_APPLICATION_CREDENTIALS_JSON: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}
-          
-          # --- เพิ่มเข้ามาใหม่ ---
-          # ตัวแปรนี้จะบอก pyppeteer ให้ไปใช้เบราว์เซอร์ที่เราติดตั้งไว้ใน Step 3
-          # เพื่อป้องกันไม่ให้มันดาวน์โหลดเบราว์เซอร์ของตัวเองซ้ำๆ
-          PYPPETEER_EXECUTABLE_PATH: /usr/bin/chromium-browser
         run: python worker.py
