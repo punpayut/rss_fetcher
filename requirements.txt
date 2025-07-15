@@ -9,7 +9,9 @@ groq
 feedparser
 requests
 requests-html
-lxml<5.0.0
+lxml_html_clean
+pyppeteer
+pyppeteer-stealth
 beautifulsoup4
 
 # Libraries for finance_news_backend.py
