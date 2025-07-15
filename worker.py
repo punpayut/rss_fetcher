@@ -1,11 +1,11 @@
-# worker.py (Final Version with Anti-Scraping Fix)
+# worker.py (Final Version with JavaScript Rendering for Investing.com)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
 - This script is designed to be run on a schedule (e.g., via GitHub Actions).
 - It fetches news from a comprehensive list of English and Thai RSS feeds.
 - For select sources (Yahoo, CNBC, Investing.com), it follows the link to scrape the full article content.
-  If scraping fails, it gracefully falls back to using the RSS summary or title.
+  - For Investing.com, it uses a headless browser to render JavaScript and bypass anti-bot measures.
 - It analyzes news sequentially with a delay to respect API rate limits.
 - It stores the structured data in Firestore.
 """
@@ -24,6 +24,9 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 from dataclasses import dataclass, asdict
+
+### NEW/UPDATED ###
+from requests_html import HTMLSession # Use this for sites with JS challenges
 
 from groq import Groq
 import logging
@@ -127,38 +130,34 @@ def fetch_cnbc_article_content(url: str) -> str:
 
 ### UPDATED ###
 def fetch_investing_article_content(url: str) -> str:
-    """ Fetches and parses full article content from an Investing.com news link with realistic headers. """
+    """ Fetches and parses content from Investing.com by rendering JavaScript first. """
+    session = HTMLSession()
     base_url = 'https://www.investing.com'
     if url.startswith('/'):
         url = base_url + url
         
-    # Realistic headers to mimic a real browser and bypass basic anti-bot measures
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',  # Do Not Track
-        'Upgrade-Insecure-Requests': '1',
-        'Referer': base_url, # Pretend we came from the homepage
-    }
-    
     try:
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status() # This will raise an exception for 4xx or 5xx status codes
-        soup = BeautifulSoup(response.content, 'html.parser')
+        response = session.get(url, timeout=15)
+        response.raise_for_status()
         
-        article_body = soup.find('div', id='article_container')
+        # This is the crucial step: execute the JavaScript on the page
+        # The timeout here is for the rendering process itself.
+        logger.info(f"   -> Rendering JavaScript for {url}...")
+        response.html.render(timeout=20, sleep=1) # sleep=1 to wait for dynamic content
+        
+        # Now search the *rendered* HTML
+        article_body = response.html.find('div#article_container', first=True)
         if not article_body:
-             article_body = soup.find('div', id='article')
+             article_body = response.html.find('div#article', first=True)
 
         if article_body:
-            for element in article_body.find_all("div", class_=["related_quotes", "js-related-article-wrapper"]):
+            # We can now process the found element
+            soup = BeautifulSoup(article_body.html, 'html.parser')
+            for element in soup.find_all("div", class_=["related_quotes", "js-related-article-wrapper"]):
                 element.decompose()
-                
-            return ' '.join(p.get_text(strip=True) for p in article_body.find_all('p'))
+            return ' '.join(p.get_text(strip=True) for p in soup.find_all('p'))
         
-        logger.warning(f"Could not find article body for Investing.com URL: {url}")
+        logger.warning(f"Could not find article body after rendering for Investing.com URL: {url}")
         return ""
     except requests.exceptions.HTTPError as e:
         logger.error(f"HTTP Error {e.response.status_code} while scraping Investing.com URL {url}. The site is likely blocking the request.", exc_info=False)
@@ -166,6 +165,8 @@ def fetch_investing_article_content(url: str) -> str:
     except Exception as e:
         logger.error(f"An unexpected error occurred while scraping Investing.com URL {url}: {e}", exc_info=False)
         return ""
+    finally:
+        session.close() # Close the session to free up resources
 
 ### UPDATED ###
 SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
@@ -178,6 +179,7 @@ SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Economic Indicators': fetch_investing_article_content,
 }
 
+# The rest of the file is unchanged.
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
@@ -230,8 +232,7 @@ class NewsAggregator:
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        ### UPDATED ###
-        with ThreadPoolExecutor(max_workers=3) as executor: # Reduced workers to be gentler
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
                 all_items.extend(future.result())
@@ -242,6 +243,8 @@ class NewsAggregator:
         logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from RSS feeds.")
         return sorted_items
 
+# --- The rest of the file (AIProcessor, main) is unchanged and can be copied from the previous version ---
+# ...
 class AIProcessor:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
@@ -285,7 +288,7 @@ class AIProcessor:
             logger.error(f"WORKER: Groq analysis failed for {news_item.link}. Error: {e}", exc_info=True)
             return None
 
-# --- Main Execution Logic ---
+
 def main():
     logger.info("--- Starting FinanceFlow Worker ---")
     
