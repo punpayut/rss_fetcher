@@ -8,10 +8,6 @@ groq
 # Libraries for worker.py
 feedparser
 requests
-requests-html
-lxml_html_clean
-pyppeteer
-pyppeteer-stealth
 beautifulsoup4
 
 # Libraries for finance_news_backend.py
