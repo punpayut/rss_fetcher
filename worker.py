@@ -1,11 +1,11 @@
-# worker.py (Final Version with Multi-Pattern Scraper & Smart Fallback)
+# worker.py (Version with CNBC Scraper & Scalable Logic)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
 - This script is designed to be run on a schedule (e.g., via GitHub Actions).
 - It fetches news from a comprehensive list of English and Thai RSS feeds.
-- For Yahoo Finance, it follows the link to scrape the full article content for better AI analysis.
-  If scraping fails (due to different page layouts), it gracefully falls back to using the title.
+- For select sources (Yahoo, CNBC), it follows the link to scrape the full article content.
+  If scraping fails, it gracefully falls back to using the RSS summary or title.
 - It analyzes news sequentially with a delay to respect API rate limits.
 - It stores the structured data in Firestore.
 """
@@ -17,7 +17,7 @@ import re
 import base64
 import time
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import feedparser
@@ -89,46 +89,57 @@ def clean_html(raw_html: str) -> str:
 def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
-def fetch_full_article_content(url: str) -> str:
-    """
-    Fetches and parses the full article content from a Yahoo Finance news link.
-    It tries multiple patterns to find the article body.
-    """
+# --- Scraper Functions ---
+
+def fetch_yahoo_article_content(url: str) -> str:
+    """ Fetches and parses full article content from a Yahoo Finance news link. """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # --- Multi-pattern search logic ---
-        # Pattern 1: The most common article layout ('caas-body')
         article_body = soup.find('div', class_='caas-body')
-        
-        # Pattern 2: Fallback for different layouts (e.g., 'div.body.yf-1ir6o1g')
         if not article_body:
-            logger.info(f"   -> 'caas-body' not found. Trying pattern 2 ('div.body')...")
             article_body = soup.find('div', class_=re.compile(r'\bbody\b'))
-
         if article_body:
-            # Get all text from paragraph tags within the found body
-            paragraphs = article_body.find_all('p')
-            full_text = ' '.join(p.get_text(strip=True) for p in paragraphs)
-            return full_text
-        else:
-            logger.warning(f"Could not find any known article body for URL: {url}")
-            return ""
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch article from {url}: {e}")
+            return ' '.join(p.get_text(strip=True) for p in article_body.find_all('p'))
+        logger.warning(f"Could not find any known article body for Yahoo URL: {url}")
         return ""
     except Exception as e:
-        logger.error(f"An unexpected error occurred while scraping {url}: {e}", exc_info=True)
+        logger.error(f"Error scraping Yahoo URL {url}: {e}", exc_info=False)
         return ""
+
+### NEW/UPDATED ###
+def fetch_cnbc_article_content(url: str) -> str:
+    """ Fetches and parses full article content from a CNBC news link. """
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        article_body = soup.find('div', class_='ArticleBody-articleBody')
+        if article_body:
+            return ' '.join(p.get_text(strip=True) for p in article_body.find_all('p'))
+        logger.warning(f"Could not find article body for CNBC URL: {url}")
+        return ""
+    except Exception as e:
+        logger.error(f"Error scraping CNBC URL {url}: {e}", exc_info=False)
+        return ""
+
+### NEW/UPDATED ###
+# --- Scraper Function Mapping ---
+# Maps a source name to its dedicated scraper function.
+# This makes it easy to add more scrapers in the future.
+SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
+    'Yahoo Finance': fetch_yahoo_article_content,
+    'CNBC Top News': fetch_cnbc_article_content,
+    # 'MarketWatch': fetch_marketwatch_content, # Add new scrapers here
+}
 
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
+    ### NEW/UPDATED ###
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
@@ -140,22 +151,32 @@ class NewsAggregator:
                 try:
                     content_to_analyze = ""
                     
-                    # --- SMART FALLBACK LOGIC ---
-                    if source_name == 'Yahoo Finance':
-                        logger.info(f"-> Attempting to scrape full article: {entry.title[:50]}...")
-                        scraped_content = fetch_full_article_content(entry.link)
-                        
-                        if scraped_content:
-                            logger.info(f"   -> Success! Scraped content found for: {entry.link}")
-                            content_to_analyze = scraped_content
-                        else:
-                            # If scraping fails, fall back to using the title.
-                            logger.warning(f"   -> Scraping failed. Falling back to using article title for: {entry.link}")
-                            content_to_analyze = entry.get('title', '')
-                    else:
-                        # Fallback logic for all other feeds
-                        content_to_analyze = entry.get('summary', entry.get('description', entry.get('title', '')))
+                    # --- REFINED SCRAPING & FALLBACK LOGIC ---
+                    scraped_content = ""
+                    
+                    # 1. Check if a dedicated scraper exists for this source
+                    if source_name in SCRAPER_MAPPING:
+                        scraper_function = SCRAPER_MAPPING[source_name]
+                        logger.info(f"-> [{source_name}] Attempting to scrape full article...")
+                        scraped_content = scraper_function(entry.link)
 
+                    # 2. Decide which content to use
+                    if scraped_content:
+                        # Priority 1: Use the successfully scraped full article
+                        content_to_analyze = scraped_content
+                        logger.info(f"   -> [{source_name}] Scrape successful. Using full content.")
+                    else:
+                        # Priority 2 (Fallback): Use the RSS summary
+                        if source_name in SCRAPER_MAPPING:
+                            logger.warning(f"   -> [{source_name}] Scrape failed. Falling back to RSS summary.")
+                        
+                        content_to_analyze = entry.get('summary', entry.get('description', ''))
+                        
+                        # Priority 3 (Ultimate Fallback): If summary is also empty, use the title
+                        if not content_to_analyze:
+                            logger.warning(f"   -> RSS summary is empty. Falling back to title.")
+                            content_to_analyze = entry.get('title', '')
+                    
                     cleaned_content = clean_html(content_to_analyze)
                     
                     if not cleaned_content:
@@ -182,7 +203,7 @@ class NewsAggregator:
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        with ThreadPoolExecutor(max_workers=5) as executor: # Reduced workers to be gentler when scraping
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
                 all_items.extend(future.result())
@@ -196,6 +217,7 @@ class NewsAggregator:
         return sorted_items
 
 class AIProcessor:
+    # ... (No changes needed in this class)
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key) if self.api_key else None
@@ -240,6 +262,7 @@ class AIProcessor:
 
 
 # --- Main Execution Logic ---
+# ... (No changes needed in this function)
 def main():
     logger.info("--- Starting FinanceFlow Worker ---")
     
