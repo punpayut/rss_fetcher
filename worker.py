@@ -56,7 +56,7 @@ except Exception as e:
 # --- Constants ---
 RSS_FEEDS = {
     'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
-    'Investing Stock Analyst': 'https://www.investing.com/rss/news_1065.rss',
+    'Investing Investment Ideas': 'https://www.investing.com/rss/news_1065.rss',
     'CNBC Top News': 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
     'Stock Market News': 'https://www.investing.com/rss/news_25.rss',
     'MarketWatch': 'http://www.marketwatch.com/rss/topstories',
