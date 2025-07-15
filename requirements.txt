@@ -8,6 +8,7 @@ groq
 # Libraries for worker.py
 feedparser
 requests
+requests-html
 beautifulsoup4
 
 # Libraries for finance_news_backend.py
