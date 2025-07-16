@@ -1,4 +1,4 @@
-# worker.py (Version with CNBC Scraper & Scalable Logic)
+# worker.py (Version with Robust Fetching & Smart Scraping)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Callable
 from concurrent.futures import ThreadPoolExecutor
+import http # Import http module for exception handling
 
 import feedparser
 import requests
@@ -90,9 +91,7 @@ def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
 # --- Scraper Functions ---
-
 def fetch_yahoo_article_content(url: str) -> str:
-    """ Fetches and parses full article content from a Yahoo Finance news link. """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -110,7 +109,6 @@ def fetch_yahoo_article_content(url: str) -> str:
         return ""
 
 def fetch_cnbc_article_content(url: str) -> str:
-    """ Fetches and parses full article content from a CNBC news link. """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
@@ -134,62 +132,61 @@ SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
-    # ### REVISED VERSION ###
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
-            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-            feed = feedparser.parse(url, agent=user_agent)
+            # Use 'requests' to fetch feed content robustly, then parse with feedparser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+                'Accept': 'application/xml,application/xhtml+xml,text/html;q=0.9, text/plain;q=0.8,*/*;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
+            response = requests.get(url, headers=headers, timeout=20)
+            response.raise_for_status()
+            
+            feed = feedparser.parse(response.content)
+
+            if feed.bozo:
+                logger.warning(f"WORKER: Feed from {source_name} might be malformed. Error: {feed.get('bozo_exception', 'Unknown')}")
+            if not feed.entries:
+                logger.warning(f"WORKER: Feed from {source_name} was fetched but contains no entries.")
+                return []
 
             for entry in feed.entries[:7]:
                 try:
                     content_to_analyze = ""
                     scraped_content = ""
                     
-                    # <<< CHANGE START: REVISED SCRAPING LOGIC >>>
-                    
-                    # 1. Check if a dedicated scraper exists for this source
                     if source_name in SCRAPER_MAPPING:
-                        # Special handling for Yahoo Finance to avoid scraping partner sites
                         if source_name == 'Yahoo Finance':
-                            # Scrape only if the link is on a yahoo.com domain
                             if 'finance.yahoo.com' in entry.link:
-                                logger.info(f"-> [Yahoo Finance Native] Attempting to scrape full article from Yahoo domain...")
+                                logger.info(f"-> [Yahoo Finance Native] Attempting to scrape...")
                                 scraper_function = SCRAPER_MAPPING[source_name]
                                 scraped_content = scraper_function(entry.link)
                             else:
-                                # This is a partner link (e.g., Barrons, Reuters), so we skip scraping.
                                 logger.info(f"-> [Yahoo Finance Partner] Skipping scrape for non-Yahoo domain: {entry.link[:70]}...")
                         else:
-                            # For other sources with scrapers (like CNBC), scrape directly.
-                            logger.info(f"-> [{source_name}] Attempting to scrape full article...")
+                            logger.info(f"-> [{source_name}] Attempting to scrape...")
                             scraper_function = SCRAPER_MAPPING[source_name]
                             scraped_content = scraper_function(entry.link)
-
-                    # <<< CHANGE END: REVISED SCRAPING LOGIC >>>
-
-                    # 2. Decide which content to use (Fallback Logic)
+                    
                     if scraped_content:
-                        # Priority 1: Use the successfully scraped full article
                         content_to_analyze = scraped_content
-                        logger.info(f"   -> [{source_name}] Scrape successful. Using full content.")
+                        logger.info(f"   -> [{source_name}] Scrape successful.")
                     else:
-                        # Priority 2 (Fallback): Use the RSS summary
-                        if source_name in SCRAPER_MAPPING: # Only log this warning if a scrape was attempted
-                            logger.warning(f"   -> [{source_name}] Scrape failed or was skipped. Falling back to RSS summary.")
+                        if source_name in SCRAPER_MAPPING:
+                            logger.warning(f"   -> [{source_name}] Scrape failed/skipped. Falling back to RSS summary.")
                         
                         content_to_analyze = entry.get('summary', entry.get('description', ''))
                         
-                        # Priority 3 (Ultimate Fallback): If summary is also empty, use the title
                         if not content_to_analyze:
-                            logger.warning(f"   -> RSS summary is empty. Falling back to title.")
+                            logger.warning(f"   -> RSS summary empty. Falling back to title.")
                             content_to_analyze = entry.get('title', '')
                     
                     cleaned_content = clean_html(content_to_analyze)
-                    
                     if not cleaned_content:
-                        logger.warning(f"Skipping entry because no content could be found: {entry.link}")
+                        logger.warning(f"Skipping entry: no content found for {entry.link}")
                         continue
 
                     published_dt = datetime(*entry.published_parsed[:6]) if hasattr(entry, 'published_parsed') else datetime.now()
@@ -206,8 +203,11 @@ class NewsAggregator:
                     items.append(news_item)
                 except Exception as e:
                     logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}", exc_info=False)
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"WORKER: Network error fetching {source_name}: {e}", exc_info=False)
         except Exception as e:
-            logger.error(f"WORKER: A critical error occurred in _fetch_from_feed for {source_name}: {e}", exc_info=True)
+            logger.error(f"WORKER: Critical error in _fetch_from_feed for {source_name}: {e}", exc_info=True)
         return items
 
     def get_latest_news(self) -> List[NewsItem]:
@@ -226,7 +226,6 @@ class NewsAggregator:
         return sorted_items
 
 class AIProcessor:
-    # ... (No changes in this class)
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key) if self.api_key else None
@@ -269,9 +268,6 @@ class AIProcessor:
             logger.error(f"WORKER: Groq analysis failed for {news_item.link}. Error: {e}", exc_info=True)
             return None
 
-
-# --- Main Execution Logic ---
-# ... (No changes in this function)
 def main():
     logger.info("--- Starting FinanceFlow Worker ---")
     
