@@ -59,7 +59,7 @@ RSS_FEEDS = {
     'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
     'Nasdaq.com': 'https://www.nasdaq.com/feed/rssoutbound?category=Markets',
     'CNBC Top News': 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
-    'Stock Market News': 'https://th.investing.com/rss/news_25.rss',
+    'Stock Market News': 'https://www.investing.com/rss/news_25.rss',
     'MarketWatch': 'http://www.marketwatch.com/rss/topstories',
     'CNN Money': 'http://rss.cnn.com/rss/money_latest.rss',
     'Financial Times': 'https://www.ft.com/rss/home',
