@@ -1,11 +1,11 @@
-# worker.py (Simplified Version - Removed Investing.com Scraping)
+# worker.py (Version with CNBC Scraper & Scalable Logic)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
 - This script is designed to be run on a schedule (e.g., via GitHub Actions).
 - It fetches news from a comprehensive list of English and Thai RSS feeds.
 - For select sources (Yahoo, CNBC), it follows the link to scrape the full article content.
-  For all other sources, it falls back to the RSS summary.
+  If scraping fails, it gracefully falls back to using the RSS summary or title.
 - It analyzes news sequentially with a delay to respect API rate limits.
 - It stores the structured data in Firestore.
 """
@@ -18,7 +18,7 @@ import base64
 import time
 from datetime import datetime
 from typing import List, Dict, Optional, Any, Callable
-from concurrent.futures import ThreadPoolExecutor # กลับมาใช้ ThreadPoolExecutor ที่เร็วกว่าได้
+from concurrent.futures import ThreadPoolExecutor
 
 import feedparser
 import requests
@@ -37,16 +37,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Firebase Initialization ---
+# --- Firebase Initialization for Worker ---
 try:
-    if not firebase_admin._apps:
-        service_account_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
-        if service_account_json_str:
-            service_account_info = json.loads(service_account_json_str)
-            cred = credentials.Certificate(service_account_info)
-        else:
-            cred = credentials.ApplicationDefault()
-        firebase_admin.initialize_app(cred)
+    service_account_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+    if service_account_json_str:
+        service_account_info = json.loads(service_account_json_str)
+        cred = credentials.Certificate(service_account_info)
+    else:
+        cred = credentials.ApplicationDefault()
+    firebase_admin.initialize_app(cred)
     db_firestore = firestore.client()
     analyzed_news_collection = db_firestore.collection('analyzed_news')
     logger.info("WORKER: Firebase initialized successfully.")
@@ -91,8 +90,10 @@ def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
 # --- Scraper Functions ---
+
 def fetch_yahoo_article_content(url: str) -> str:
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+    """ Fetches and parses full article content from a Yahoo Finance news link. """
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
@@ -108,8 +109,10 @@ def fetch_yahoo_article_content(url: str) -> str:
         logger.error(f"Error scraping Yahoo URL {url}: {e}", exc_info=False)
         return ""
 
+### NEW/UPDATED ###
 def fetch_cnbc_article_content(url: str) -> str:
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+    """ Fetches and parses full article content from a CNBC news link. """
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
@@ -123,45 +126,59 @@ def fetch_cnbc_article_content(url: str) -> str:
         logger.error(f"Error scraping CNBC URL {url}: {e}", exc_info=False)
         return ""
 
+### NEW/UPDATED ###
 # --- Scraper Function Mapping ---
-# เหลือแค่ Scraper ที่ทำงานได้จริง
+# Maps a source name to its dedicated scraper function.
+# This makes it easy to add more scrapers in the future.
 SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Yahoo Finance': fetch_yahoo_article_content,
     'CNBC Top News': fetch_cnbc_article_content,
+    # 'MarketWatch': fetch_marketwatch_content, # Add new scrapers here
 }
+
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
+    ### NEW/UPDATED ###
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
-            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
+            user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
             feed = feedparser.parse(url, agent=user_agent)
 
             for entry in feed.entries[:7]:
                 try:
                     content_to_analyze = ""
                     
-                    # Logic การ Scrape กลับมาเรียบง่าย
+                    # --- REFINED SCRAPING & FALLBACK LOGIC ---
+                    scraped_content = ""
+                    
+                    # 1. Check if a dedicated scraper exists for this source
                     if source_name in SCRAPER_MAPPING:
                         scraper_function = SCRAPER_MAPPING[source_name]
                         logger.info(f"-> [{source_name}] Attempting to scrape full article...")
                         scraped_content = scraper_function(entry.link)
-                        if scraped_content:
-                            content_to_analyze = scraped_content
-                            logger.info(f"   -> [{source_name}] Scrape successful.")
-                        else:
-                            logger.warning(f"   -> [{source_name}] Scrape failed. Falling back to RSS summary.")
-                            content_to_analyze = entry.get('summary', entry.get('description', ''))
-                    else:
-                        # สำหรับเว็บอื่นๆ รวมถึง Investing.com จะใช้ summary จาก RSS
-                        content_to_analyze = entry.get('summary', entry.get('description', ''))
 
-                    if not content_to_analyze:
-                        content_to_analyze = entry.get('title', '')
+                    # 2. Decide which content to use
+                    if scraped_content:
+                        # Priority 1: Use the successfully scraped full article
+                        content_to_analyze = scraped_content
+                        logger.info(f"   -> [{source_name}] Scrape successful. Using full content.")
+                    else:
+                        # Priority 2 (Fallback): Use the RSS summary
+                        if source_name in SCRAPER_MAPPING:
+                            logger.warning(f"   -> [{source_name}] Scrape failed. Falling back to RSS summary.")
+                        
+                        content_to_analyze = entry.get('summary', entry.get('description', ''))
+                        
+                        # Priority 3 (Ultimate Fallback): If summary is also empty, use the title
+                        if not content_to_analyze:
+                            logger.warning(f"   -> RSS summary is empty. Falling back to title.")
+                            content_to_analyze = entry.get('title', '')
                     
                     cleaned_content = clean_html(content_to_analyze)
+                    
                     if not cleaned_content:
                         logger.warning(f"Skipping entry because no content could be found: {entry.link}")
                         continue
@@ -170,8 +187,12 @@ class NewsAggregator:
                     safe_id = url_to_firestore_id(entry.link)
                     
                     news_item = NewsItem(
-                        id=safe_id, title=entry.title, link=entry.link, source=source_name,
-                        published=published_dt, content=cleaned_content[:4000]
+                        id=safe_id,
+                        title=entry.title,
+                        link=entry.link,
+                        source=source_name,
+                        published=published_dt,
+                        content=cleaned_content[:4000] # Increased limit for full articles
                     )
                     items.append(news_item)
                 except Exception as e:
@@ -182,7 +203,6 @@ class NewsAggregator:
 
     def get_latest_news(self) -> List[NewsItem]:
         all_items = []
-        # กลับมาใช้ ThreadPoolExecutor ที่เร็วกว่าได้แล้ว
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
             for future in futures:
@@ -190,13 +210,14 @@ class NewsAggregator:
         
         unique_items_dict = {item.id: item for item in all_items if item.content}
         unique_items_list = list(unique_items_dict.values())
+        
         sorted_items = sorted(unique_items_list, key=lambda x: x.published, reverse=True)
+        
         logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from RSS feeds.")
         return sorted_items
 
-# --- AIProcessor and main function are unchanged ---
-# ... (เนื้อหาเหมือนเดิมทุกประการ)
 class AIProcessor:
+    # ... (No changes needed in this class)
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key) if self.api_key else None
@@ -240,6 +261,8 @@ class AIProcessor:
             return None
 
 
+# --- Main Execution Logic ---
+# ... (No changes needed in this function)
 def main():
     logger.info("--- Starting FinanceFlow Worker ---")
     
@@ -250,17 +273,9 @@ def main():
     
     items_to_process = []
     if analyzed_news_collection:
-        all_ids = [item.id for item in latest_news]
-        # Check for existing documents in batches of 30 (Firestore 'in' query limit)
-        existing_ids = set()
-        for i in range(0, len(all_ids), 30):
-            batch_ids = all_ids[i:i+30]
-            docs = analyzed_news_collection.where('id', 'in', batch_ids).stream()
-            for doc in docs:
-                existing_ids.add(doc.id)
-        
         for item in latest_news:
-            if item.id not in existing_ids:
+            doc_ref = analyzed_news_collection.document(item.id)
+            if not doc_ref.get().exists:
                 items_to_process.append(item)
     else:
         items_to_process = latest_news
@@ -292,8 +307,8 @@ def main():
                 saved_count += 1
                 logger.info(f"-> Successfully saved analysis for article ID {item.id}")
 
-        # Delay to respect API rate limits
-        delay_seconds = 4 
+        # Increased delay to be more respectful of API rate limits
+        delay_seconds = 4
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)
             
