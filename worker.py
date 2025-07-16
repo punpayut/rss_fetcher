@@ -109,7 +109,6 @@ def fetch_yahoo_article_content(url: str) -> str:
         logger.error(f"Error scraping Yahoo URL {url}: {e}", exc_info=False)
         return ""
 
-### NEW/UPDATED ###
 def fetch_cnbc_article_content(url: str) -> str:
     """ Fetches and parses full article content from a CNBC news link. """
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
@@ -126,20 +125,16 @@ def fetch_cnbc_article_content(url: str) -> str:
         logger.error(f"Error scraping CNBC URL {url}: {e}", exc_info=False)
         return ""
 
-### NEW/UPDATED ###
 # --- Scraper Function Mapping ---
-# Maps a source name to its dedicated scraper function.
-# This makes it easy to add more scrapers in the future.
 SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Yahoo Finance': fetch_yahoo_article_content,
     'CNBC Top News': fetch_cnbc_article_content,
-    # 'MarketWatch': fetch_marketwatch_content, # Add new scrapers here
 }
 
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
-    ### NEW/UPDATED ###
+    # ### REVISED VERSION ###
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
@@ -150,25 +145,39 @@ class NewsAggregator:
             for entry in feed.entries[:7]:
                 try:
                     content_to_analyze = ""
-                    
-                    # --- REFINED SCRAPING & FALLBACK LOGIC ---
                     scraped_content = ""
+                    
+                    # <<< CHANGE START: REVISED SCRAPING LOGIC >>>
                     
                     # 1. Check if a dedicated scraper exists for this source
                     if source_name in SCRAPER_MAPPING:
-                        scraper_function = SCRAPER_MAPPING[source_name]
-                        logger.info(f"-> [{source_name}] Attempting to scrape full article...")
-                        scraped_content = scraper_function(entry.link)
+                        # Special handling for Yahoo Finance to avoid scraping partner sites
+                        if source_name == 'Yahoo Finance':
+                            # Scrape only if the link is on a yahoo.com domain
+                            if 'finance.yahoo.com' in entry.link:
+                                logger.info(f"-> [Yahoo Finance Native] Attempting to scrape full article from Yahoo domain...")
+                                scraper_function = SCRAPER_MAPPING[source_name]
+                                scraped_content = scraper_function(entry.link)
+                            else:
+                                # This is a partner link (e.g., Barrons, Reuters), so we skip scraping.
+                                logger.info(f"-> [Yahoo Finance Partner] Skipping scrape for non-Yahoo domain: {entry.link[:70]}...")
+                        else:
+                            # For other sources with scrapers (like CNBC), scrape directly.
+                            logger.info(f"-> [{source_name}] Attempting to scrape full article...")
+                            scraper_function = SCRAPER_MAPPING[source_name]
+                            scraped_content = scraper_function(entry.link)
 
-                    # 2. Decide which content to use
+                    # <<< CHANGE END: REVISED SCRAPING LOGIC >>>
+
+                    # 2. Decide which content to use (Fallback Logic)
                     if scraped_content:
                         # Priority 1: Use the successfully scraped full article
                         content_to_analyze = scraped_content
                         logger.info(f"   -> [{source_name}] Scrape successful. Using full content.")
                     else:
                         # Priority 2 (Fallback): Use the RSS summary
-                        if source_name in SCRAPER_MAPPING:
-                            logger.warning(f"   -> [{source_name}] Scrape failed. Falling back to RSS summary.")
+                        if source_name in SCRAPER_MAPPING: # Only log this warning if a scrape was attempted
+                            logger.warning(f"   -> [{source_name}] Scrape failed or was skipped. Falling back to RSS summary.")
                         
                         content_to_analyze = entry.get('summary', entry.get('description', ''))
                         
@@ -192,13 +201,13 @@ class NewsAggregator:
                         link=entry.link,
                         source=source_name,
                         published=published_dt,
-                        content=cleaned_content[:4000] # Increased limit for full articles
+                        content=cleaned_content[:4000]
                     )
                     items.append(news_item)
                 except Exception as e:
-                    logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}", exc_info=True)
+                    logger.warning(f"WORKER: Could not parse entry from {source_name} for link {entry.get('link', 'N/A')}: {e}", exc_info=False)
         except Exception as e:
-            logger.error(f"WORKER: A critical error occurred in _fetch_from_feed for {source_name}", exc_info=True)
+            logger.error(f"WORKER: A critical error occurred in _fetch_from_feed for {source_name}: {e}", exc_info=True)
         return items
 
     def get_latest_news(self) -> List[NewsItem]:
@@ -217,7 +226,7 @@ class NewsAggregator:
         return sorted_items
 
 class AIProcessor:
-    # ... (No changes needed in this class)
+    # ... (No changes in this class)
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key) if self.api_key else None
@@ -262,7 +271,7 @@ class AIProcessor:
 
 
 # --- Main Execution Logic ---
-# ... (No changes needed in this function)
+# ... (No changes in this function)
 def main():
     logger.info("--- Starting FinanceFlow Worker ---")
     
@@ -307,7 +316,6 @@ def main():
                 saved_count += 1
                 logger.info(f"-> Successfully saved analysis for article ID {item.id}")
 
-        # Increased delay to be more respectful of API rate limits
         delay_seconds = 4
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)
