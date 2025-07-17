@@ -135,7 +135,7 @@ class NewsAggregator:
 
         logger.info("WORKER: Fetching from EOD Historical Data API")
         items = []
-        url = f"https://eodhd.com/api/news?api_token={api_token}&fmt=json&limit=10"
+        url = f"https://eodhd.com/api/news?api_token={api_token}&fmt=json&limit=10&language=en"
 
         try:
             response = requests.get(url, timeout=20)
