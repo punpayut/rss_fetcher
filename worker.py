@@ -188,7 +188,7 @@ class NewsAggregator:
             if feed.bozo:
                 logger.warning(f"WORKER: Feed from {source_name} might be malformed. Error: {feed.get('bozo_exception', 'Unknown')}")
             
-            for entry in feed.entries[:3]:
+            for entry in feed.entries[:5]:
                 try:
                     content_to_analyze = ""
                     scraped_content = ""
