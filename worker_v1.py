@@ -177,6 +177,7 @@ class NewsAggregator:
         return items
 
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
+        # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
@@ -193,7 +194,6 @@ class NewsAggregator:
                     content_to_analyze = ""
                     scraped_content = ""
                     
-                    # --- 1. ตรวจสอบว่าต้อง Scrape เนื้อหาเต็มจากหน้าเว็บหรือไม่ (สำหรับ CNBC, Yahoo) ---
                     if source_name in SCRAPER_MAPPING:
                         if source_name == 'Yahoo Finance' and 'finance.yahoo.com' not in entry.link:
                              logger.info(f"-> [Yahoo Finance Partner] Skipping scrape for non-Yahoo domain: {entry.link[:70]}...")
@@ -202,27 +202,15 @@ class NewsAggregator:
                             scraper_function = SCRAPER_MAPPING[source_name]
                             scraped_content = scraper_function(entry.link)
                     
-                    # --- 2. เลือกเนื้อหาที่จะนำไปวิเคราะห์ตามลำดับความสำคัญ ---
                     if scraped_content:
-                        # 2.1) ใช้เนื้อหาที่ Scrape มาได้ก่อน (ดีที่สุด)
                         content_to_analyze = scraped_content
-                    
-                    elif source_name == 'ประชาชาติธุรกิจ' and 'content' in entry and entry.content:
-                        # 2.2) (ปรับปรุง!) ถ้าเป็น 'ประชาชาติธุรกิจ' ให้ดึงเนื้อหาเต็มจาก <content:encoded> ใน RSS โดยตรง
-                        logger.info(f"   -> [ประชาชาติธุรกิจ] Found full content in RSS. Using 'content:encoded'.")
-                        content_to_analyze = entry.content[0].value
-                    
                     else:
-                        # 2.3) Fallback: ถ้าไม่มีเงื่อนไขข้างต้น ให้ใช้ summary/description จาก RSS
                         if source_name in SCRAPER_MAPPING:
-                            # กรณีที่ Scrape ล้มเหลว
                             logger.warning(f"   -> [{source_name}] Scrape failed/skipped. Falling back to RSS summary.")
                         content_to_analyze = entry.get('summary', entry.get('description', ''))
                         if not content_to_analyze:
-                            # ถ้าไม่มี summary ก็ใช้หัวข้อข่าวแทน
                             content_to_analyze = entry.get('title', '')
                     
-                    # --- 3. ทำความสะอาดและสร้าง NewsItem ---
                     cleaned_content = clean_html(content_to_analyze)
                     if not cleaned_content:
                         continue
@@ -246,7 +234,7 @@ class NewsAggregator:
         except Exception as e:
             logger.error(f"WORKER: Critical error in _fetch_from_feed for {source_name}: {e}", exc_info=True)
         return items
-    
+
     def get_latest_news(self) -> List[NewsItem]:
         # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
         all_items = []
