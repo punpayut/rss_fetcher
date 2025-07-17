@@ -56,6 +56,7 @@ except Exception as e:
 # --- Constants ---
 RSS_FEEDS = {
     'CNBC Top News': 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
+    'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
     'ประชาชาติธุรกิจ': 'https://www.prachachat.net/finance/feed'
 }
 
@@ -159,7 +160,7 @@ class NewsAggregator:
                         id=safe_id,
                         title=entry['title'],
                         link=entry['link'],
-                        source="EOD Historical Data",
+                        source="EOD News Data",
                         published=published_dt,
                         content=entry['content'][:4000] # จำกัดความยาว content
                     )
