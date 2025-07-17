@@ -160,7 +160,7 @@ class NewsAggregator:
                         id=safe_id,
                         title=entry['title'],
                         link=entry['link'],
-                        source="EOD News Data",
+                        source="Finance News from EOD",
                         published=published_dt,
                         content=entry['content'][:4000] # จำกัดความยาว content
                     )
