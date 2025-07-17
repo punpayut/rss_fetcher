@@ -1,12 +1,13 @@
-# worker.py (Version with Correct EOD HD API Parsing)
+# worker.py (Version with Robust Fetching & Smart Scraping)
 
 """
-FinanceFlow Worker (with Extended RSS Feeds, EOD HD API & Rate Limit Fix)
-- This script is designed to be run on a schedule (e.g., once per hour via GitHub Actions).
-- It fetches news from a comprehensive list of sources including RSS and EOD HD API.
-- For EOD HD API, it correctly parses the response and respects the Free Plan limit.
-- For select RSS sources (Yahoo, CNBC), it follows the link to scrape the full article content.
-- It analyzes news sequentially and stores the structured data in Firestore.
+FinanceFlow Worker (with Extended RSS Feeds & Rate Limit Fix)
+- This script is designed to be run on a schedule (e.g., via GitHub Actions).
+- It fetches news from a comprehensive list of English and Thai RSS feeds.
+- For select sources (Yahoo, CNBC), it follows the link to scrape the full article content.
+  If scraping fails, it gracefully falls back to using the RSS summary or title.
+- It analyzes news sequentially with a delay to respect API rate limits.
+- It stores the structured data in Firestore.
 """
 
 # --- Imports ---
@@ -15,7 +16,7 @@ import json
 import re
 import base64
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Dict, Optional, Any, Callable
 from concurrent.futures import ThreadPoolExecutor
 import http # Import http module for exception handling
@@ -55,7 +56,17 @@ except Exception as e:
 
 # --- Constants ---
 RSS_FEEDS = {
+    'Yahoo Finance': 'https://finance.yahoo.com/news/rssindex',
+    'Nasdaq.com': 'https://www.nasdaq.com/feed/rssoutbound?category=Markets',
     'CNBC Top News': 'https://www.cnbc.com/id/100003114/device/rss/rss.html',
+    'Stock Market News': 'https://www.investing.com/rss/news_25.rss',
+    'MarketWatch': 'http://www.marketwatch.com/rss/topstories',
+    'CNN Money': 'http://rss.cnn.com/rss/money_latest.rss',
+    'Financial Times': 'https://www.ft.com/rss/home',
+    'The Economist': 'https://www.economist.com/finance-and-economics/rss.xml',
+    'Forex News': 'https://www.investing.com/rss/news_1.rss',
+    'Commodities & Futures News': 'https://www.investing.com/rss/news_11.rss',
+    'Economic Indicators': 'https://www.investing.com/rss/news_95.rss',
     'ประชาชาติธุรกิจ': 'https://www.prachachat.net/finance/feed'
 }
 
@@ -80,7 +91,6 @@ def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
 # --- Scraper Functions ---
-# (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
 def fetch_yahoo_article_content(url: str) -> str:
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
@@ -114,7 +124,6 @@ def fetch_cnbc_article_content(url: str) -> str:
         return ""
 
 # --- Scraper Function Mapping ---
-# (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
 SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Yahoo Finance': fetch_yahoo_article_content,
     'CNBC Top News': fetch_cnbc_article_content,
@@ -123,79 +132,40 @@ SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
-    
-    # --- METHOD ที่ถูกปรับปรุง ---
-    def _fetch_from_eod_api(self) -> List[NewsItem]:
-        """Fetches and parses news from the EOD HD API based on actual response structure."""
-        api_token = os.getenv('EOD_HD_API_TOKEN')
-        if not api_token:
-            logger.info("WORKER: Skipping EOD HD API fetch because EOD_HD_API_TOKEN is not configured.")
-            return []
-
-        logger.info("WORKER: Fetching from EOD Historical Data API")
-        items = []
-        url = f"https://eodhd.com/api/news?api_token={api_token}&fmt=json&limit=10"
-
-        try:
-            response = requests.get(url, timeout=20)
-            response.raise_for_status()
-            api_data = response.json()
-
-            for entry in api_data:
-                try:
-                    # ตรวจสอบว่ามีข้อมูลที่จำเป็นครบถ้วนหรือไม่ (link, content, date, title)
-                    if not all(k in entry for k in ['link', 'content', 'date', 'title']):
-                        logger.warning(f"WORKER: Skipping EOD HD entry due to missing key data. Title: {entry.get('title', 'N/A')}")
-                        continue
-
-                    # 1. สร้าง ID จาก link จริง เพื่อให้ไม่ซ้ำและเป็นมาตรฐานเดียวกับ RSS
-                    safe_id = url_to_firestore_id(entry['link'])
-                    
-                    # 2. แปลง date string (ISO 8601) เป็น datetime object โดยตรง
-                    published_dt = datetime.fromisoformat(entry['date'])
-
-                    # 3. สร้าง NewsItem จากข้อมูลจริงที่ได้จาก API
-                    news_item = NewsItem(
-                        id=safe_id,
-                        title=entry['title'],
-                        link=entry['link'],
-                        source="EOD Historical Data",
-                        published=published_dt,
-                        content=entry['content'][:4000] # จำกัดความยาว content
-                    )
-                    items.append(news_item)
-                except Exception as e:
-                    logger.warning(f"WORKER: Could not parse entry from EOD HD API for title '{entry.get('title', 'N/A')}': {e}", exc_info=False)
-        
-        except requests.exceptions.RequestException as e:
-            logger.error(f"WORKER: Network error fetching EOD HD API: {e}", exc_info=False)
-        except Exception as e:
-            logger.error(f"WORKER: Critical error in _fetch_from_eod_api: {e}", exc_info=True)
-        
-        logger.info(f"WORKER: Fetched {len(items)} articles from EOD HD API.")
-        return items
-
     def _fetch_from_feed(self, source_name: str, url: str) -> List[NewsItem]:
-        # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
         logger.info(f"WORKER: Fetching from {source_name}")
         items = []
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
+            # Use 'requests' to fetch feed content robustly, then parse with feedparser
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+                'Accept': 'application/xml,application/xhtml+xml,text/html;q=0.9, text/plain;q=0.8,*/*;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+            }
             response = requests.get(url, headers=headers, timeout=20)
             response.raise_for_status()
+            
             feed = feedparser.parse(response.content)
 
             if feed.bozo:
                 logger.warning(f"WORKER: Feed from {source_name} might be malformed. Error: {feed.get('bozo_exception', 'Unknown')}")
-            
-            for entry in feed.entries[:3]:
+            if not feed.entries:
+                logger.warning(f"WORKER: Feed from {source_name} was fetched but contains no entries.")
+                return []
+
+            for entry in feed.entries[:7]:
                 try:
                     content_to_analyze = ""
                     scraped_content = ""
                     
                     if source_name in SCRAPER_MAPPING:
-                        if source_name == 'Yahoo Finance' and 'finance.yahoo.com' not in entry.link:
-                             logger.info(f"-> [Yahoo Finance Partner] Skipping scrape for non-Yahoo domain: {entry.link[:70]}...")
+                        if source_name == 'Yahoo Finance':
+                            if 'finance.yahoo.com' in entry.link:
+                                logger.info(f"-> [Yahoo Finance Native] Attempting to scrape...")
+                                scraper_function = SCRAPER_MAPPING[source_name]
+                                scraped_content = scraper_function(entry.link)
+                            else:
+                                logger.info(f"-> [Yahoo Finance Partner] Skipping scrape for non-Yahoo domain: {entry.link[:70]}...")
                         else:
                             logger.info(f"-> [{source_name}] Attempting to scrape...")
                             scraper_function = SCRAPER_MAPPING[source_name]
@@ -203,21 +173,27 @@ class NewsAggregator:
                     
                     if scraped_content:
                         content_to_analyze = scraped_content
+                        logger.info(f"   -> [{source_name}] Scrape successful.")
                     else:
                         if source_name in SCRAPER_MAPPING:
                             logger.warning(f"   -> [{source_name}] Scrape failed/skipped. Falling back to RSS summary.")
+                        
                         content_to_analyze = entry.get('summary', entry.get('description', ''))
+                        
                         if not content_to_analyze:
+                            logger.warning(f"   -> RSS summary empty. Falling back to title.")
                             content_to_analyze = entry.get('title', '')
                     
                     cleaned_content = clean_html(content_to_analyze)
                     if not cleaned_content:
+                        logger.warning(f"Skipping entry: no content found for {entry.link}")
                         continue
 
-                    published_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc) if hasattr(entry, 'published_parsed') else datetime.now(timezone.utc)
+                    published_dt = datetime(*entry.published_parsed[:6]) if hasattr(entry, 'published_parsed') else datetime.now()
+                    safe_id = url_to_firestore_id(entry.link)
                     
                     news_item = NewsItem(
-                        id=url_to_firestore_id(entry.link),
+                        id=safe_id,
                         title=entry.title,
                         link=entry.link,
                         source=source_name,
@@ -235,14 +211,10 @@ class NewsAggregator:
         return items
 
     def get_latest_news(self) -> List[NewsItem]:
-        # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
         all_items = []
-        eod_items = self._fetch_from_eod_api()
-        all_items.extend(eod_items)
-        
         with ThreadPoolExecutor(max_workers=5) as executor:
-            rss_futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
-            for future in rss_futures:
+            futures = [executor.submit(self._fetch_from_feed, name, url) for name, url in RSS_FEEDS.items()]
+            for future in futures:
                 all_items.extend(future.result())
         
         unique_items_dict = {item.id: item for item in all_items if item.content}
@@ -250,11 +222,10 @@ class NewsAggregator:
         
         sorted_items = sorted(unique_items_list, key=lambda x: x.published, reverse=True)
         
-        logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from ALL sources.")
+        logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from RSS feeds.")
         return sorted_items
 
 class AIProcessor:
-    # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key) if self.api_key else None
@@ -265,6 +236,7 @@ class AIProcessor:
     def analyze_news_item(self, news_item: NewsItem) -> Optional[Dict[str, Any]]:
         if not self.client or not news_item.content:
             return None
+        
         prompt = f"""
         You are a top-tier financial analyst AI for an app called FinanceFlow. Analyze the provided news summary or full article content. The content might be in English or Thai.
 
@@ -283,6 +255,7 @@ class AIProcessor:
 
         Do not include any other text, explanations, or markdown. Your entire response must be only the JSON object itself.
         """
+        
         try:
             chat_completion = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
@@ -296,7 +269,6 @@ class AIProcessor:
             return None
 
 def main():
-    # (แนะนำให้ใช้การเช็คข้อมูลซ้ำแบบ chunking เพื่อประสิทธิภาพที่ดีกว่า)
     logger.info("--- Starting FinanceFlow Worker ---")
     
     aggregator = NewsAggregator()
@@ -306,17 +278,10 @@ def main():
     
     items_to_process = []
     if analyzed_news_collection:
-        # ใช้ 'in' query เพื่อเช็คเอกสารทีละมากๆ (ไม่เกิน 30 ID ต่อครั้ง) จะเร็วกว่า
-        all_ids = [item.id for item in latest_news]
-        existing_ids = set()
-        for i in range(0, len(all_ids), 30):
-            chunk = all_ids[i:i+30]
-            if chunk:
-                docs = analyzed_news_collection.where('id', 'in', chunk).stream()
-                for doc in docs:
-                    existing_ids.add(doc.id)
-        
-        items_to_process = [item for item in latest_news if item.id not in existing_ids]
+        for item in latest_news:
+            doc_ref = analyzed_news_collection.document(item.id)
+            if not doc_ref.get().exists:
+                items_to_process.append(item)
     else:
         items_to_process = latest_news
 
@@ -329,20 +294,25 @@ def main():
     saved_count = 0
     
     for item in items_to_process:
-        analysis = ai_processor.analyze_news_item(item)
+        analysis = None
+        try:
+            logger.info(f"Analyzing: {item.title[:60]}...")
+            analysis = ai_processor.analyze_news_item(item)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during AI analysis for {item.link}: {e}", exc_info=True)
 
         if analysis:
             item.analysis = analysis
             data_to_save = asdict(item)
-            data_to_save['published'] = item.published.isoformat()
             data_to_save['processed_at'] = firestore.SERVER_TIMESTAMP
+            data_to_save['published'] = item.published.isoformat()
             
             if analyzed_news_collection:
                 analyzed_news_collection.document(item.id).set(data_to_save)
                 saved_count += 1
                 logger.info(f"-> Successfully saved analysis for article ID {item.id}")
 
-        delay_seconds = 4 # หน่วงเวลาเหมือนเดิม
+        delay_seconds = 4
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)
             
