@@ -6,7 +6,7 @@ on:
   schedule:
     # Run every hour at the 0th minute (e.g., 1:00, 2:00, 3:00)
     # This schedule is suitable for the EOD HD API Free Plan (10 news/hour)
-    - cron: '0 * * * *'
+    - cron: '0 */2 * * *'
   
   # Allows manual triggering from the GitHub Actions UI
   workflow_dispatch:
