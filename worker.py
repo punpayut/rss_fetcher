@@ -1,4 +1,4 @@
-# worker.py (Final Version with Counter Update)
+# worker.py (Updated from original, keeping original formatting)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds, EOD HD API & Rate Limit Fix)
@@ -50,7 +50,6 @@ try:
     db_firestore = firestore.client()
     analyzed_news_collection = db_firestore.collection('analyzed_news')
     
-    # <<< MODIFICATION 1: Add a reference to the metadata collection >>>
     metadata_collection = db_firestore.collection('collections_metadata')
     
     logger.info("WORKER: Firebase initialized successfully.")
@@ -203,9 +202,7 @@ class NewsAggregator:
                     else:
                         if source_name in SCRAPER_MAPPING:
                             logger.warning(f"   -> [{source_name}] Scrape failed/skipped. Falling back to RSS summary.")
-                        content_to_analyze = entry.get('summary', entry.get('description', ''))
-                        if not content_to_analyze:
-                            content_to_analyze = entry.get('title', '')
+                        content_to_analyze = entry.get('summary', entry.get('description', '') or entry.get('title', ''))
                     
                     cleaned_content = clean_html(content_to_analyze)
                     if not cleaned_content:
@@ -249,6 +246,7 @@ class NewsAggregator:
         logger.info(f"WORKER: Fetched and processed {len(sorted_items)} articles from ALL sources.")
         return sorted_items
 
+# <<< THIS CLASS IS MODIFIED >>>
 class AIProcessor:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
@@ -260,8 +258,10 @@ class AIProcessor:
     def analyze_news_item(self, news_item: NewsItem) -> Optional[Dict[str, Any]]:
         if not self.client or not news_item.content:
             return None
+            
+        # This is the updated prompt with your requested changes
         prompt = f"""
-        You are a top-tier financial analyst AI for an app called FinanceFlow. Analyze the provided news summary or full article content. The content might be in English or Thai.
+        You are a top-tier financial analyst AI for an app called FinanceFlow. Analyze the provided news article content, which may be in English or Thai.
 
         Source: {news_item.source}
         Title: {news_item.title}
@@ -269,11 +269,16 @@ class AIProcessor:
 
         Your primary task is to respond with a valid JSON object. This JSON must conform to the following structure:
         {{
-          "summary_en": "A concise, one-paragraph summary of the article in English.",
-          "summary_th": "A fluent, natural-sounding Thai translation of the English summary. If the original is already in Thai, make this summary a more concise version in Thai.",
+          "summary_en": "A concise, under-3-minutes-read-summary of the article in English, simplified for easy understanding, avoid using financial jargon. A rookies without financial knowledge must be able to read and understand the summary.",
+          "summary_th": "A fluent, natural-sounding Thai translation of the English summary. If the original content is already in Thai, make this a more concise version of that content.",
           "sentiment": "Analyze the sentiment. Choose one: 'Positive', 'Negative', 'Neutral'.",
-          "impact_score": "On a scale of 1-10, how impactful is this news for an average investor?",
-          "affected_symbols": ["A list of stock ticker symbols (e.g., 'AAPL', 'NVDA') or Thai stock symbols (e.g., 'PTT', 'AOT') directly mentioned or heavily implied in the text."]
+          "impact_score": "On a scale of 1-10, how impactful is this news for an average investor's portfolio?",
+          "affected_symbols": ["A list of stock ticker symbols (e.g., 'AAPL', 'NVDA') or Thai stock symbols (e.g., 'PTT', 'AOT') directly mentioned or heavily implied in the text. Return an empty list if none are found."],
+          "impact_analysis": [
+            "Provide a brief analysis of the news's potential impact in bullet points. For example, if the news is about an interest rate cut, an analysis point might be 'Lower borrowing costs could boost company profits and stock prices.'",
+            "Another bullet point explaining a different aspect of the impact.",
+            "A third point on potential risks or counter-effects."
+          ]
         }}
 
         Do not include any other text, explanations, or markdown. Your entire response must be only the JSON object itself.
@@ -282,7 +287,7 @@ class AIProcessor:
             chat_completion = self.client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
-                temperature=0.1,
+                temperature=0.2, # Slightly increased for more creative analysis
                 response_format={"type": "json_object"}
             )
             return json.loads(chat_completion.choices[0].message.content)
@@ -323,7 +328,6 @@ def main():
     logger.info(f"WORKER: Analyzing {len(items_to_process)} new articles one by one...")
     saved_count = 0
     
-    # <<< MODIFICATION 2: Get a reference to the counter document ONCE before the loop >>>
     counter_doc_ref = metadata_collection.document('analyzed_news_metadata')
 
     for item in items_to_process:
@@ -340,14 +344,13 @@ def main():
                 # Save the new article
                 analyzed_news_collection.document(item.id).set(data_to_save)
                 
-                # <<< MODIFICATION 3: Increment the counter AFTER successful save >>>
-                # This is an atomic operation, safe for concurrent runs (though this script runs sequentially)
+                # Increment the counter AFTER successful save
                 counter_doc_ref.update({'count': firestore.Increment(1)})
 
                 saved_count += 1
                 logger.info(f"-> Successfully saved article ID {item.id} and incremented counter.")
 
-        delay_seconds = 4
+        delay_seconds = 4 # หน่วงเวลาเหมือนเดิม
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)
             
