@@ -1,4 +1,4 @@
-# worker.py (Version with Correct EOD HD API Parsing)
+# worker.py (Final Version with Counter Update)
 
 """
 FinanceFlow Worker (with Extended RSS Feeds, EOD HD API & Rate Limit Fix)
@@ -7,6 +7,7 @@ FinanceFlow Worker (with Extended RSS Feeds, EOD HD API & Rate Limit Fix)
 - For EOD HD API, it correctly parses the response and respects the Free Plan limit.
 - For select RSS sources (Yahoo, CNBC), it follows the link to scrape the full article content.
 - It analyzes news sequentially and stores the structured data in Firestore.
+- It now increments a counter in Firestore for each new article saved.
 """
 
 # --- Imports ---
@@ -48,6 +49,10 @@ try:
     firebase_admin.initialize_app(cred)
     db_firestore = firestore.client()
     analyzed_news_collection = db_firestore.collection('analyzed_news')
+    
+    # <<< MODIFICATION 1: Add a reference to the metadata collection >>>
+    metadata_collection = db_firestore.collection('collections_metadata')
+    
     logger.info("WORKER: Firebase initialized successfully.")
 except Exception as e:
     logger.error(f"WORKER: Failed to initialize Firebase: {e}", exc_info=True)
@@ -81,7 +86,6 @@ def url_to_firestore_id(url: str) -> str:
     return base64.urlsafe_b64encode(url.encode('utf-8')).decode('utf-8')
 
 # --- Scraper Functions ---
-# (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
 def fetch_yahoo_article_content(url: str) -> str:
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'}
     try:
@@ -115,7 +119,6 @@ def fetch_cnbc_article_content(url: str) -> str:
         return ""
 
 # --- Scraper Function Mapping ---
-# (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
 SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
     'Yahoo Finance': fetch_yahoo_article_content,
     'CNBC Top News': fetch_cnbc_article_content,
@@ -124,10 +127,7 @@ SCRAPER_MAPPING: Dict[str, Callable[[str], str]] = {
 
 # --- Worker-specific Service Classes ---
 class NewsAggregator:
-    
-    # --- METHOD ที่ถูกปรับปรุง ---
     def _fetch_from_eod_api(self) -> List[NewsItem]:
-        """Fetches and parses news from the EOD HD API based on actual response structure."""
         api_token = os.getenv('EOD_HD_API_TOKEN')
         if not api_token:
             logger.info("WORKER: Skipping EOD HD API fetch because EOD_HD_API_TOKEN is not configured.")
@@ -144,25 +144,19 @@ class NewsAggregator:
 
             for entry in api_data:
                 try:
-                    # ตรวจสอบว่ามีข้อมูลที่จำเป็นครบถ้วนหรือไม่ (link, content, date, title)
                     if not all(k in entry for k in ['link', 'content', 'date', 'title']):
                         logger.warning(f"WORKER: Skipping EOD HD entry due to missing key data. Title: {entry.get('title', 'N/A')}")
                         continue
-
-                    # 1. สร้าง ID จาก link จริง เพื่อให้ไม่ซ้ำและเป็นมาตรฐานเดียวกับ RSS
-                    safe_id = url_to_firestore_id(entry['link'])
                     
-                    # 2. แปลง date string (ISO 8601) เป็น datetime object โดยตรง
+                    safe_id = url_to_firestore_id(entry['link'])
                     published_dt = datetime.fromisoformat(entry['date'])
-
-                    # 3. สร้าง NewsItem จากข้อมูลจริงที่ได้จาก API
                     news_item = NewsItem(
                         id=safe_id,
                         title=entry['title'],
                         link=entry['link'],
                         source="Finance News from EOD",
                         published=published_dt,
-                        content=entry['content'][:4000] # จำกัดความยาว content
+                        content=entry['content'][:4000]
                     )
                     items.append(news_item)
                 except Exception as e:
@@ -193,7 +187,6 @@ class NewsAggregator:
                     content_to_analyze = ""
                     scraped_content = ""
                     
-                    # --- 1. ตรวจสอบว่าต้อง Scrape เนื้อหาเต็มจากหน้าเว็บหรือไม่ (สำหรับ CNBC, Yahoo) ---
                     if source_name in SCRAPER_MAPPING:
                         if source_name == 'Yahoo Finance' and 'finance.yahoo.com' not in entry.link:
                              logger.info(f"-> [Yahoo Finance Partner] Skipping scrape for non-Yahoo domain: {entry.link[:70]}...")
@@ -202,27 +195,18 @@ class NewsAggregator:
                             scraper_function = SCRAPER_MAPPING[source_name]
                             scraped_content = scraper_function(entry.link)
                     
-                    # --- 2. เลือกเนื้อหาที่จะนำไปวิเคราะห์ตามลำดับความสำคัญ ---
                     if scraped_content:
-                        # 2.1) ใช้เนื้อหาที่ Scrape มาได้ก่อน (ดีที่สุด)
                         content_to_analyze = scraped_content
-                    
                     elif source_name == 'ประชาชาติธุรกิจ' and 'content' in entry and entry.content:
-                        # 2.2) (ปรับปรุง!) ถ้าเป็น 'ประชาชาติธุรกิจ' ให้ดึงเนื้อหาเต็มจาก <content:encoded> ใน RSS โดยตรง
                         logger.info(f"   -> [ประชาชาติธุรกิจ] Found full content in RSS. Using 'content:encoded'.")
                         content_to_analyze = entry.content[0].value
-                    
                     else:
-                        # 2.3) Fallback: ถ้าไม่มีเงื่อนไขข้างต้น ให้ใช้ summary/description จาก RSS
                         if source_name in SCRAPER_MAPPING:
-                            # กรณีที่ Scrape ล้มเหลว
                             logger.warning(f"   -> [{source_name}] Scrape failed/skipped. Falling back to RSS summary.")
                         content_to_analyze = entry.get('summary', entry.get('description', ''))
                         if not content_to_analyze:
-                            # ถ้าไม่มี summary ก็ใช้หัวข้อข่าวแทน
                             content_to_analyze = entry.get('title', '')
                     
-                    # --- 3. ทำความสะอาดและสร้าง NewsItem ---
                     cleaned_content = clean_html(content_to_analyze)
                     if not cleaned_content:
                         continue
@@ -248,7 +232,6 @@ class NewsAggregator:
         return items
     
     def get_latest_news(self) -> List[NewsItem]:
-        # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
         all_items = []
         eod_items = self._fetch_from_eod_api()
         all_items.extend(eod_items)
@@ -267,7 +250,6 @@ class NewsAggregator:
         return sorted_items
 
 class AIProcessor:
-    # (ไม่มีการเปลี่ยนแปลงในส่วนนี้)
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key) if self.api_key else None
@@ -309,7 +291,6 @@ class AIProcessor:
             return None
 
 def main():
-    # (แนะนำให้ใช้การเช็คข้อมูลซ้ำแบบ chunking เพื่อประสิทธิภาพที่ดีกว่า)
     logger.info("--- Starting FinanceFlow Worker ---")
     
     aggregator = NewsAggregator()
@@ -318,8 +299,8 @@ def main():
     latest_news = aggregator.get_latest_news()
     
     items_to_process = []
+    # Check if collection reference is valid before using
     if analyzed_news_collection:
-        # ใช้ 'in' query เพื่อเช็คเอกสารทีละมากๆ (ไม่เกิน 30 ID ต่อครั้ง) จะเร็วกว่า
         all_ids = [item.id for item in latest_news]
         existing_ids = set()
         for i in range(0, len(all_ids), 30):
@@ -331,6 +312,7 @@ def main():
         
         items_to_process = [item for item in latest_news if item.id not in existing_ids]
     else:
+        # Fallback if firestore connection failed
         items_to_process = latest_news
 
     logger.info(f"WORKER: Found {len(items_to_process)} new articles to process.")
@@ -341,6 +323,9 @@ def main():
     logger.info(f"WORKER: Analyzing {len(items_to_process)} new articles one by one...")
     saved_count = 0
     
+    # <<< MODIFICATION 2: Get a reference to the counter document ONCE before the loop >>>
+    counter_doc_ref = metadata_collection.document('analyzed_news_metadata')
+
     for item in items_to_process:
         analysis = ai_processor.analyze_news_item(item)
 
@@ -350,12 +335,19 @@ def main():
             data_to_save['published'] = item.published.isoformat()
             data_to_save['processed_at'] = firestore.SERVER_TIMESTAMP
             
+            # Check again to be safe
             if analyzed_news_collection:
+                # Save the new article
                 analyzed_news_collection.document(item.id).set(data_to_save)
-                saved_count += 1
-                logger.info(f"-> Successfully saved analysis for article ID {item.id}")
+                
+                # <<< MODIFICATION 3: Increment the counter AFTER successful save >>>
+                # This is an atomic operation, safe for concurrent runs (though this script runs sequentially)
+                counter_doc_ref.update({'count': firestore.Increment(1)})
 
-        delay_seconds = 4 # หน่วงเวลาเหมือนเดิม
+                saved_count += 1
+                logger.info(f"-> Successfully saved article ID {item.id} and incremented counter.")
+
+        delay_seconds = 4
         logger.info(f"Waiting for {delay_seconds} seconds before next API call...")
         time.sleep(delay_seconds)
             
